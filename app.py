@@ -91,71 +91,75 @@ def find_pages(html):
         return max([int(m) for m in matches])
     return 1
 
-def request_page(url, proxy_url, referer, max_retries=4):
-    proxies = {"http": proxy_url, "https": proxy_url}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-User": "?1",
-        "Referer": referer,
-    }
-
-    last_error = ""
-    for deneme in range(max_retries):
-        try:
-            # Her istekte temiz bağlantı açarak Cloudflare IP takibini kırıyoruz
-            res = cureq.get(
-                url,
-                proxies=proxies,
-                impersonate="chrome120",
-                headers=headers,
-                timeout=18
-            )
-            if res.status_code == 404:
-                return 404, ""
-            if res.status_code == 200:
-                if "Just a moment" in res.text or "Cloudflare" in res.text:
-                    last_error = "Cloudflare Challenge"
-                else:
-                    return 200, res.text
-            else:
-                last_error = f"HTTP {res.status_code}"
-            time.sleep(1.0)
-        except Exception as e:
-            last_error = str(e)
-            time.sleep(1.0)
-    return 0, last_error
-
 def veri_cek(kullanici_adi, tip, proxy_url):
     kisiler = {}
-    first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
-    base_ref = f"https://letterboxd.com/{kullanici_adi}/"
+    proxies = {"http": proxy_url, "https": proxy_url}
+    
+    # Çerezleri sayfalar arasında korumak için oturumu koruyoruz
+    session = cureq.Session()
 
-    status, html_1 = request_page(first_url, proxy_url, referer=base_ref)
-    if status == 404:
-        return None
-    if status != 200:
-        return f"BLOK: 1. sayfa açılamadı ({html_1})"
+    first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
+    first_ok = False
+    html_1 = ""
+    son_hata = ""
+
+    for deneme in range(4):
+        try:
+            res = session.get(
+                first_url,
+                proxies=proxies,
+                impersonate="chrome124",
+                timeout=20
+            )
+            if res.status_code == 404:
+                return None
+            if res.status_code == 200:
+                if "Just a moment" in res.text or "Cloudflare" in res.text:
+                    son_hata = "Cloudflare Challenge"
+                else:
+                    html_1 = res.text
+                    first_ok = True
+                    break
+            else:
+                son_hata = f"HTTP {res.status_code}"
+            time.sleep(1.0)
+        except Exception as e:
+            son_hata = str(e)
+            session = cureq.Session()
+            time.sleep(1.0)
+
+    if not first_ok:
+        return f"BLOK: 1. sayfa açılamadı ({son_hata})"
 
     kisiler.update(parse_html_fast(html_1))
     max_page = find_pages(html_1)
 
-    prev_url = first_url
     for p in range(2, max_page + 1):
+        time.sleep(random.uniform(0.8, 1.4))
         page_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/"
-        st_code, p_html = request_page(page_url, proxy_url, referer=prev_url)
-        if st_code != 200:
-            return f"BLOK: Sayfa {p} açılamadı ({p_html})"
-        kisiler.update(parse_html_fast(p_html))
-        prev_url = page_url
-        time.sleep(random.uniform(0.4, 0.8))
+        page_ok = False
+        p_hata = ""
+        
+        for deneme in range(4):
+            try:
+                res = session.get(
+                    page_url,
+                    proxies=proxies,
+                    impersonate="chrome124",
+                    timeout=20
+                )
+                if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
+                    kisiler.update(parse_html_fast(res.text))
+                    page_ok = True
+                    break
+                p_hata = f"HTTP {res.status_code}"
+                time.sleep(1.0)
+            except Exception as e:
+                p_hata = str(e)
+                time.sleep(1.0)
+                
+        if not page_ok:
+            return f"BLOK: Sayfa {p} açılamadı ({p_hata})"
 
     return kisiler
 

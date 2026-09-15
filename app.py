@@ -47,7 +47,7 @@ header {visibility: hidden;}
     width: 100%;
 }
 
-img { border-radius: 10px; }
+img { border-radius: 10px; object-fit: cover; }
 
 .card {
     background-color:#121E15;
@@ -114,24 +114,23 @@ async def fetch_single_page(url, proxy_url, kullanici_adi, max_retries=4, sem=No
 
     async def _req():
         last_status = 0
-        for deneme in range(max_retries):
+        for _ in range(max_retries):
             try:
                 async with AsyncSession() as s:
-                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=20)
+                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=18)
                     if res.status_code == 404:
                         return 404, ""
                     if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
                         return 200, res.text
                     last_status = res.status_code
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(0.5)
             except Exception as e:
                 last_status = str(e)
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.4)
         return 0, str(last_status)
 
     if sem:
         async with sem:
-            await asyncio.sleep(0.3)
             return await _req()
     return await _req()
 
@@ -148,8 +147,7 @@ async def scrape_target(kullanici_adi, tip, proxy_url):
     max_page = find_max_page(html)
 
     if max_page > 1:
-        # Proxy kanalını tıkamamak için paralel limiti 2 yaptık
-        sem = asyncio.Semaphore(2)
+        sem = asyncio.Semaphore(3)
         tasks = [
             fetch_single_page(
                 f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/",
@@ -170,10 +168,11 @@ async def scrape_target(kullanici_adi, tip, proxy_url):
     return kisiler
 
 async def main_async(kullanici_adi, proxy_url):
-    # Takip ve takipçiyi sırayla çekerek proxy havuzunu rahatlatıyoruz
-    following = await scrape_target(kullanici_adi, "following", proxy_url)
-    followers = await scrape_target(kullanici_adi, "followers", proxy_url)
-    return following, followers
+    res_following, res_followers = await asyncio.gather(
+        scrape_target(kullanici_adi, "following", proxy_url),
+        scrape_target(kullanici_adi, "followers", proxy_url)
+    )
+    return res_following, res_followers
 
 def analiz_calistir(kullanici_adi):
     try:
@@ -208,11 +207,17 @@ if st.button("Analizi Başlat 🎬"):
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
 
+            # Hızlı küme (Set) karşılaştırması
+            following_set = set(following.keys())
+            followers_set = set(followers.keys())
+
             if islem_modu == "Beni Takip Etmeyenler":
-                sonuc = {u: following[u] for u in following if u not in followers}
+                hedef_set = following_set - followers_set
+                sonuc = {u: following[u] for u in hedef_set}
                 baslik = "Takip etmeyenler"
             else:
-                sonuc = {u: followers[u] for u in followers if u not in following}
+                hedef_set = followers_set - following_set
+                sonuc = {u: followers[u] for u in hedef_set}
                 baslik = "Senin takip etmediklerin"
 
             st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
@@ -229,7 +234,7 @@ if st.button("Analizi Başlat 🎬"):
                         with cols[j]:
                             st.markdown(f"""
                             <div class="card">
-                                <img src="{img}" width="50">
+                                <img src="{img}" width="50" height="50">
                                 <div>
                                     <b>{usr}</b><br>
                                     <a href="https://letterboxd.com/{usr}/" target="_blank">Profile git</a>

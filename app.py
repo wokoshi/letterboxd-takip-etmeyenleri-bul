@@ -95,37 +95,41 @@ def veri_cek(kullanici_adi, tip, proxy_url):
     kisiler = {}
     proxies = {"http": proxy_url, "https": proxy_url}
     
-    # Çerezleri sayfalar arasında korumak için oturumu koruyoruz
     session = cureq.Session()
+
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://letterboxd.com/{kullanici_adi}/",
+    }
 
     first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
     first_ok = False
     html_1 = ""
     son_hata = ""
 
-    for deneme in range(4):
+    # 1. Sayfayı normal tarayıcı gibi alıyoruz
+    for _ in range(4):
         try:
             res = session.get(
                 first_url,
                 proxies=proxies,
+                headers=base_headers,
                 impersonate="chrome124",
                 timeout=20
             )
             if res.status_code == 404:
                 return None
             if res.status_code == 200:
-                if "Just a moment" in res.text or "Cloudflare" in res.text:
-                    son_hata = "Cloudflare Challenge"
-                else:
+                if "Just a moment" not in res.text and "Cloudflare" not in res.text:
                     html_1 = res.text
                     first_ok = True
                     break
-            else:
-                son_hata = f"HTTP {res.status_code}"
+            son_hata = f"HTTP {res.status_code}"
             time.sleep(1.0)
         except Exception as e:
             son_hata = str(e)
-            session = cureq.Session()
             time.sleep(1.0)
 
     if not first_ok:
@@ -134,17 +138,28 @@ def veri_cek(kullanici_adi, tip, proxy_url):
     kisiler.update(parse_html_fast(html_1))
     max_page = find_pages(html_1)
 
+    # 2. ve sonraki sayfalar için AJAX başlıkları ekliyoruz (403'ü kıran kısım)
+    ajax_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": first_url,
+    }
+
     for p in range(2, max_page + 1):
-        time.sleep(random.uniform(0.8, 1.4))
+        time.sleep(random.uniform(0.5, 1.0))
         page_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/"
         page_ok = False
         p_hata = ""
         
-        for deneme in range(4):
+        for _ in range(4):
             try:
+                # AJAX isteği atıyoruz
                 res = session.get(
                     page_url,
                     proxies=proxies,
+                    headers=ajax_headers,
                     impersonate="chrome124",
                     timeout=20
                 )

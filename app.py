@@ -73,14 +73,16 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-def get_fresh_proxy(base_proxy):
-    rand_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-    if "__session-" in base_proxy:
-        return re.sub(r"__session-[^:@]+", f"__session-{rand_id}", base_proxy)
-    elif "@" in base_proxy:
-        p = base_proxy.split("@")
-        return f"{p[0]}__session-{rand_id}@{p[1]}"
-    return base_proxy
+def build_proxy(raw_proxy):
+    rand_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    if "@" in raw_proxy:
+        auth, host = raw_proxy.split("@")
+        if "__session-" in auth:
+            auth = re.sub(r"__session-[^:]+", f"__session-{rand_id}", auth)
+        else:
+            auth = f"{auth}__session-{rand_id}"
+        return f"{auth}@{host}"
+    return raw_proxy
 
 def parse_page_users(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -97,27 +99,30 @@ def parse_page_users(html):
 
 async def fetch_page(url, raw_proxy, kullanici_adi, max_retries=5, sem=None):
     headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"https://letterboxd.com/{kullanici_adi}/",
     }
     
     async def _req():
+        last_status = 0
         for _ in range(max_retries):
-            px = get_fresh_proxy(raw_proxy)
+            px = build_proxy(raw_proxy)
             proxies = {"http": px, "https": px}
             try:
                 async with AsyncSession() as s:
-                    res = await s.get(url, proxies=proxies, impersonate="chrome124", headers=headers, timeout=10)
+                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=12)
                     if res.status_code == 404:
                         return 404, ""
-                    if res.status_code != 200 or "Cloudflare" in res.text or "Just a moment" in res.text:
-                        await asyncio.sleep(random.uniform(0.4, 0.8))
-                        continue
-                    return 200, res.text
-            except Exception:
-                await asyncio.sleep(0.3)
-        return 0, ""
+                    if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
+                        return 200, res.text
+                    last_status = res.status_code
+                    await asyncio.sleep(random.uniform(0.4, 0.8))
+            except Exception as e:
+                last_status = f"ERR: {str(e)}"
+                await asyncio.sleep(0.4)
+        return last_status, ""
 
     if sem:
         async with sem:
@@ -131,7 +136,7 @@ async def scrape_target(kullanici_adi, tip, raw_proxy):
     if status == 404:
         return None
     if status != 200:
-        return "BLOK"
+        return f"BLOK: {status}"
     
     kisiler = parse_page_users(html)
     if not kisiler:
@@ -149,7 +154,7 @@ async def scrape_target(kullanici_adi, tip, raw_proxy):
                 max_page = page_num
 
     if max_page > 1:
-        sem = asyncio.Semaphore(6)
+        sem = asyncio.Semaphore(5)
         tasks = [
             fetch_page(f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", raw_proxy, kullanici_adi, sem=sem)
             for p in range(2, max_page + 1)
@@ -160,7 +165,7 @@ async def scrape_target(kullanici_adi, tip, raw_proxy):
             if st_code == 200:
                 kisiler.update(parse_page_users(page_html))
             else:
-                return "BLOK"
+                return f"BLOK: {st_code}"
 
     return kisiler
 
@@ -195,9 +200,11 @@ if st.button("Analizi Başlat 🎬"):
             following, followers = analiz_calistir(hedef_kullanici.strip().lower())
 
         if following == "PROXY_ERROR" or followers == "PROXY_ERROR":
-            st.error("Proxy bağlantısı kurulamadı.")
-        elif following == "BLOK" or followers == "BLOK":
-            st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz.")
+            st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Hata: Proxy Secret Ayarı Yok)")
+        elif isinstance(following, str) and following.startswith("BLOK"):
+            st.error(f"Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Following {following})")
+        elif isinstance(followers, str) and followers.startswith("BLOK"):
+            st.error(f"Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Followers {followers})")
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:

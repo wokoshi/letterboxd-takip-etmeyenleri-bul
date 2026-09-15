@@ -1,7 +1,6 @@
 import streamlit as st
-from bs4 import BeautifulSoup
-from curl_cffi.requests import AsyncSession
-import asyncio
+from curl_cffi import requests as cureq
+import time
 import random
 import re
 
@@ -72,121 +71,87 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-def parse_page_users(html):
-    soup = BeautifulSoup(html, "html.parser")
-    satirlar = soup.find_all("div", class_="person-summary")
+USER_BLOCK_RE = re.compile(r'<div class="person-summary">([\s\S]*?)</div>\s*</div>', re.IGNORECASE)
+HREF_RE = re.compile(r'href="/([^"/]+)/"', re.IGNORECASE)
+IMG_RE = re.compile(r'src="([^"]+)"', re.IGNORECASE)
+PAGE_NUM_RE = re.compile(r'/page/(\d+)/', re.IGNORECASE)
+
+def parse_html_fast(html):
     kisiler = {}
-    for s in satirlar:
-        a = s.find("a", class_="avatar") or s.find("a", class_="name")
-        if a and a.get("href"):
-            raw_href = a["href"].strip("/").split("/")
-            if raw_href:
-                username = raw_href[-1].lower()
-                img = s.find("img")
-                img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
-                if username:
-                    kisiler[username] = img_url
+    blocks = USER_BLOCK_RE.findall(html)
+    for b in blocks:
+        u_match = HREF_RE.search(b)
+        if u_match:
+            u = u_match.group(1).lower()
+            if u in ["films", "reviews", "lists", "activity"]:
+                continue
+            img_match = IMG_RE.search(b)
+            img_url = img_match.group(1) if img_match else "https://s.ltrbxd.com/static/img/avatar220.png"
+            kisiler[u] = img_url
     return kisiler
 
-def find_max_page(html):
-    soup = BeautifulSoup(html, "html.parser")
-    pages = [1]
-    pag_div = soup.find("div", class_="paginate-pages") or soup.find("div", class_="pagination")
-    if pag_div:
-        for a in pag_div.find_all("a"):
-            txt = a.get_text(strip=True)
-            if txt.isdigit():
-                pages.append(int(txt))
-            else:
-                match = re.search(r'/page/(\d+)/', a.get("href", ""))
-                if match:
-                    pages.append(int(match.group(1)))
-    return max(pages)
+def find_pages(html, tip):
+    matches = PAGE_NUM_RE.findall(html)
+    if matches:
+        return max([int(m) for m in matches])
+    return 1
 
-async def fetch_single_page(url, proxy_url, kullanici_adi, max_retries=4, sem=None):
+def veri_cek(kullanici_adi, tip, proxy_url):
+    kisiler = {}
+    proxies = {"http": proxy_url, "https": proxy_url}
+    session = cureq.Session()
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"https://letterboxd.com/{kullanici_adi}/",
     }
-    proxies = {"http": proxy_url, "https": proxy_url}
 
-    async def _req():
-        last_status = 0
-        for _ in range(max_retries):
-            try:
-                async with AsyncSession() as s:
-                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=18)
-                    if res.status_code == 404:
-                        return 404, ""
-                    if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
-                        return 200, res.text
-                    last_status = res.status_code
-                    await asyncio.sleep(0.5)
-            except Exception as e:
-                last_status = str(e)
-                await asyncio.sleep(0.4)
-        return 0, str(last_status)
-
-    if sem:
-        async with sem:
-            return await _req()
-    return await _req()
-
-async def scrape_target(kullanici_adi, tip, proxy_url):
+    # 1. Sayfa
     first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
-    status, html = await fetch_single_page(first_url, proxy_url, kullanici_adi)
+    first_ok = False
+    html_1 = ""
 
-    if status == 404:
-        return None
-    if status != 200:
-        return f"BLOK: {html if html else status}"
+    for _ in range(5):
+        try:
+            res = session.get(first_url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=12)
+            if res.status_code == 404:
+                return None
+            if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
+                html_1 = res.text
+                first_ok = True
+                break
+            time.sleep(0.5)
+        except Exception:
+            session = cureq.Session()
+            time.sleep(0.5)
 
-    kisiler = parse_page_users(html)
-    max_page = find_max_page(html)
+    if not first_ok:
+        return "BLOK"
 
-    if max_page > 1:
-        sem = asyncio.Semaphore(3)
-        tasks = [
-            fetch_single_page(
-                f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/",
-                proxy_url,
-                kullanici_adi,
-                sem=sem
-            )
-            for p in range(2, max_page + 1)
-        ]
-        results = await asyncio.gather(*tasks)
+    kisiler.update(parse_html_fast(html_1))
+    max_page = find_pages(html_1, tip)
 
-        for st_code, page_html in results:
-            if st_code == 200:
-                kisiler.update(parse_page_users(page_html))
-            else:
-                return f"BLOK: Sayfa çekilemedi ({st_code})"
+    # Varsa Kalan Sayfalar (Senkron ve seri çekim)
+    for p in range(2, max_page + 1):
+        page_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/"
+        page_ok = False
+        for _ in range(4):
+            try:
+                res = session.get(page_url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=12)
+                if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
+                    kisiler.update(parse_html_fast(res.text))
+                    page_ok = True
+                    break
+                time.sleep(0.3)
+            except Exception:
+                session = cureq.Session()
+                time.sleep(0.4)
+        if not page_ok:
+            return "BLOK"
 
     return kisiler
-
-async def main_async(kullanici_adi, proxy_url):
-    res_following, res_followers = await asyncio.gather(
-        scrape_target(kullanici_adi, "following", proxy_url),
-        scrape_target(kullanici_adi, "followers", proxy_url)
-    )
-    return res_following, res_followers
-
-def analiz_calistir(kullanici_adi):
-    try:
-        proxy_url = st.secrets["DATAIMPULSE_PROXY"]
-    except Exception:
-        return "PROXY_ERROR", "PROXY_ERROR"
-
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    return loop.run_until_complete(main_async(kullanici_adi, proxy_url))
 
 if st.button("Analizi Başlat 🎬"):
 
@@ -194,52 +159,55 @@ if st.button("Analizi Başlat 🎬"):
         st.warning("Kullanıcı adınızı giriniz")
     else:
         with st.spinner("Tarama başlatılıyor... Takipçi ve takip edilen sayınızın yoğunluğuna bağlı olarak işlemin süresi değişiklik gösterebilir. Lütfen bekleyiniz."):
-            cleaned_username = hedef_kullanici.strip().lower()
-            following, followers = analiz_calistir(cleaned_username)
+            try:
+                proxy_url = st.secrets["DATAIMPULSE_PROXY"]
+            except Exception:
+                proxy_url = None
 
-        if following == "PROXY_ERROR" or followers == "PROXY_ERROR":
-            st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Hata: Proxy Secret Ayarı Yok)")
-        elif isinstance(following, str) and following.startswith("BLOK"):
-            st.error(f"Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Following {following})")
-        elif isinstance(followers, str) and followers.startswith("BLOK"):
-            st.error(f"Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Followers {followers})")
-        elif following is None or followers is None:
-            st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
-        else:
-
-            # Hızlı küme (Set) karşılaştırması
-            following_set = set(following.keys())
-            followers_set = set(followers.keys())
-
-            if islem_modu == "Beni Takip Etmeyenler":
-                hedef_set = following_set - followers_set
-                sonuc = {u: following[u] for u in hedef_set}
-                baslik = "Takip etmeyenler"
+            if not proxy_url:
+                st.error("Proxy ayarı bulunamadı.")
             else:
-                hedef_set = followers_set - following_set
-                sonuc = {u: followers[u] for u in hedef_set}
-                baslik = "Senin takip etmediklerin"
+                user_clean = hedef_kullanici.strip().lower()
+                following = veri_cek(user_clean, "following", proxy_url)
+                followers = veri_cek(user_clean, "followers", proxy_url)
 
-            st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
+                if following == "BLOK" or followers == "BLOK":
+                    st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz.")
+                elif following is None or followers is None:
+                    st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
+                else:
+                    following_set = set(following.keys())
+                    followers_set = set(followers.keys())
 
-            users = list(sonuc.items())
+                    if islem_modu == "Beni Takip Etmeyenler":
+                        hedef_set = following_set - followers_set
+                        sonuc = {u: following[u] for u in hedef_set}
+                        baslik = "Takip etmeyenler"
+                    else:
+                        hedef_set = followers_set - following_set
+                        sonuc = {u: followers[u] for u in hedef_set}
+                        baslik = "Senin takip etmediklerin"
 
-            for i in range(0, len(users), 2):
-                cols = st.columns(2)
+                    st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 
-                for j in range(2):
-                    if i + j < len(users):
-                        usr, img = users[i+j]
+                    users = list(sonuc.items())
 
-                        with cols[j]:
-                            st.markdown(f"""
-                            <div class="card">
-                                <img src="{img}" width="50" height="50">
-                                <div>
-                                    <b>{usr}</b><br>
-                                    <a href="https://letterboxd.com/{usr}/" target="_blank">Profile git</a>
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                    for i in range(0, len(users), 2):
+                        cols = st.columns(2)
+
+                        for j in range(2):
+                            if i + j < len(users):
+                                usr, img = users[i+j]
+
+                                with cols[j]:
+                                    st.markdown(f"""
+                                    <div class="card">
+                                        <img src="{img}" width="50" height="50">
+                                        <div>
+                                            <b>{usr}</b><br>
+                                            <a href="https://letterboxd.com/{usr}/" target="_blank">Profile git</a>
+                                        </div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
 
 st.markdown("<div class='footer-sig'>Created by <a href='https://letterboxd.com/wokoshi/' target='_blank'>wokoshi</a></div>", unsafe_allow_html=True)

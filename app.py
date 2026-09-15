@@ -78,10 +78,10 @@ def parse_page_users(html):
     kisiler = {}
     for s in satirlar:
         a = s.find("a", class_="name")
-        if a:
-            username = a["href"].strip("/")
+        if a and a.get("href"):
+            username = a["href"].strip("/").split("/")[-1].lower()
             img = s.find("img")
-            img_url = img["src"] if img else "https://s.ltrbxd.com/static/img/avatar220.png"
+            img_url = img["src"] if img and img.get("src") else "https://s.ltrbxd.com/static/img/avatar220.png"
             kisiler[username] = img_url
     return kisiler
 
@@ -105,7 +105,7 @@ async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
                     if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
                         return 200, res.text
                     last_status = res.status_code
-                    await asyncio.sleep(random.uniform(0.5, 1.2))
+                    await asyncio.sleep(random.uniform(0.5, 1.0))
             except Exception as e:
                 last_status = f"ERR: {str(e)}"
                 await asyncio.sleep(0.5)
@@ -126,8 +126,6 @@ async def scrape_target(kullanici_adi, tip, proxy_url):
         return f"BLOK: {status}"
     
     kisiler = parse_page_users(html)
-    if not kisiler:
-        return {}
     
     soup = BeautifulSoup(html, "html.parser")
     pagination_links = soup.select("div.paginate-pages li a")
@@ -184,7 +182,8 @@ if st.button("Analizi Başlat 🎬"):
         st.warning("Kullanıcı adınızı giriniz")
     else:
         with st.spinner("Tarama başlatılıyor... Takipçi ve takip edilen sayınızın yoğunluğuna bağlı olarak işlemin süresi değişiklik gösterebilir. Lütfen bekleyiniz."):
-            following, followers = analiz_calistir(hedef_kullanici.strip().lower())
+            cleaned_username = hedef_kullanici.strip().lower()
+            following, followers = analiz_calistir(cleaned_username)
 
         if following == "PROXY_ERROR" or followers == "PROXY_ERROR":
             st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Hata: Proxy Secret Ayarı Yok)")

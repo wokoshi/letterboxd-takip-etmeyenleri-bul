@@ -1,4 +1,5 @@
 import streamlit as st
+from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
 import asyncio
 import random
@@ -71,92 +72,94 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-# Hızlı Regex derlemeleri (BeautifulSoup yerine mikro saniyede parse)
-USER_BLOCK_RE = re.compile(r'<div class="person-summary">([\s\S]*?)</div>\s*</div>', re.IGNORECASE)
-HREF_RE = re.compile(r'href="/([^"/]+)/"', re.IGNORECASE)
-IMG_RE = re.compile(r'src="([^"]+)"', re.IGNORECASE)
-PAGE_RE = re.compile(r'/page/(\d+)/')
-
-def parse_fast(html):
+def parse_page_users(html):
+    soup = BeautifulSoup(html, "html.parser")
+    satirlar = soup.find_all("div", class_="person-summary")
     kisiler = {}
-    blocks = USER_BLOCK_RE.findall(html)
-    for b in blocks:
-        u_match = HREF_RE.search(b)
-        if u_match:
-            u = u_match.group(1).lower()
-            # Sistem linklerini ele
-            if u in ["films", "reviews", "lists", "activity"]:
-                continue
-            img_match = IMG_RE.search(b)
-            img_url = img_match.group(1) if img_match else "https://s.ltrbxd.com/static/img/avatar220.png"
-            kisiler[u] = img_url
+    for s in satirlar:
+        a = s.find("a", class_="avatar") or s.find("a", class_="name")
+        if a and a.get("href"):
+            username = a["href"].strip("/").split("/")[-1].lower()
+            img = s.find("img")
+            img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
+            if username:
+                kisiler[username] = img_url
     return kisiler
 
-async def fetch_page(url, proxy_url, kullanici_adi, sem=None):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": f"https://letterboxd.com/{kullanici_adi}/",
-    }
+async def fetch_page(session, url, proxy_url, headers, max_retries=4, sem=None):
     proxies = {"http": proxy_url, "https": proxy_url}
-
+    
     async def _do():
-        for _ in range(4):
+        last_err = ""
+        for _ in range(max_retries):
             try:
-                async with AsyncSession() as s:
-                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=9)
-                    if res.status_code == 404:
-                        return 404, ""
-                    if res.status_code == 200 and "Just a moment" not in res.text:
-                        return 200, res.text
-                    await asyncio.sleep(0.3)
-            except Exception:
-                await asyncio.sleep(0.2)
-        return 0, ""
+                res = await session.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=16)
+                if res.status_code == 404:
+                    return 404, ""
+                if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
+                    return 200, res.text
+                last_err = f"HTTP {res.status_code}"
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                last_err = str(e)
+                await asyncio.sleep(0.4)
+        return 0, last_err
 
     if sem:
         async with sem:
             return await _do()
     return await _do()
 
-async def scrape_target(kullanici_adi, tip, proxy_url):
+async def scrape_target(session, kullanici_adi, tip, proxy_url, headers):
     first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
-    status, html = await fetch_page(first_url, proxy_url, kullanici_adi)
+    status, html = await fetch_page(session, first_url, proxy_url, headers)
     
     if status == 404:
         return None
     if status != 200:
-        return f"BLOK: {status}"
+        return f"BLOK: {html if html else status}"
     
-    kisiler = parse_fast(html)
+    kisiler = parse_page_users(html)
     
-    # Toplam sayfa sayısını bul
-    pages = [int(p) for p in PAGE_RE.findall(html)]
-    max_page = max(pages) if pages else 1
+    soup = BeautifulSoup(html, "html.parser")
+    pagination_links = soup.select("div.paginate-pages li a")
+    max_page = 1
+    for a in pagination_links:
+        href = a.get("href", "")
+        match = re.search(r"/page/(\d+)/", href)
+        if match:
+            page_num = int(match.group(1))
+            if page_num > max_page:
+                max_page = page_num
 
     if max_page > 1:
-        sem = asyncio.Semaphore(8)  # Concurrency artırıldı
+        sem = asyncio.Semaphore(4)
         tasks = [
-            fetch_page(f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", proxy_url, kullanici_adi, sem=sem)
+            fetch_page(session, f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", proxy_url, headers, sem=sem)
             for p in range(2, max_page + 1)
         ]
         results = await asyncio.gather(*tasks)
         
-        for st_code, page_html in results:
+        for st_code, page_res in results:
             if st_code == 200:
-                kisiler.update(parse_fast(page_html))
+                kisiler.update(parse_page_users(page_res))
             else:
-                return f"BLOK: {st_code}"
+                return f"BLOK: {page_res if page_res else st_code}"
 
     return kisiler
 
 async def main_async(kullanici_adi, proxy_url):
-    # İki liste aynı anda paralel çekilir
-    return await asyncio.gather(
-        scrape_target(kullanici_adi, "following", proxy_url),
-        scrape_target(kullanici_adi, "followers", proxy_url)
-    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://letterboxd.com/{kullanici_adi}/",
+    }
+    async with AsyncSession() as session:
+        return await asyncio.gather(
+            scrape_target(session, kullanici_adi, "following", proxy_url, headers),
+            scrape_target(session, kullanici_adi, "followers", proxy_url, headers)
+        )
 
 def analiz_calistir(kullanici_adi):
     try:
@@ -177,7 +180,7 @@ if st.button("Analizi Başlat 🎬"):
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
-        with st.spinner("Tarama paralel olarak yapılıyor, lütfen bekleyiniz..."):
+        with st.spinner("Tarama başlatılıyor... Takipçi ve takip edilen sayınızın yoğunluğuna bağlı olarak işlemin süresi değişiklik gösterebilir. Lütfen bekleyiniz."):
             cleaned_username = hedef_kullanici.strip().lower()
             following, followers = analiz_calistir(cleaned_username)
 

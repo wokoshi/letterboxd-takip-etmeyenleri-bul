@@ -79,100 +79,109 @@ def parse_page_users(html):
     for s in satirlar:
         a = s.find("a", class_="avatar") or s.find("a", class_="name")
         if a and a.get("href"):
-            username = a["href"].strip("/").split("/")[-1].lower()
-            img = s.find("img")
-            img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
-            if username:
-                kisiler[username] = img_url
+            raw_href = a["href"].strip("/").split("/")
+            if raw_href:
+                username = raw_href[-1].lower()
+                img = s.find("img")
+                img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
+                if username:
+                    kisiler[username] = img_url
     return kisiler
 
-async def fetch_page(session, url, proxy_url, headers, max_retries=4, sem=None):
-    proxies = {"http": proxy_url, "https": proxy_url}
-    
-    async def _do():
-        last_err = ""
-        for _ in range(max_retries):
-            try:
-                res = await session.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=16)
-                if res.status_code == 404:
-                    return 404, ""
-                if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
-                    return 200, res.text
-                last_err = f"HTTP {res.status_code}"
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                last_err = str(e)
-                await asyncio.sleep(0.4)
-        return 0, last_err
-
-    if sem:
-        async with sem:
-            return await _do()
-    return await _do()
-
-async def scrape_target(session, kullanici_adi, tip, proxy_url, headers):
-    first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
-    status, html = await fetch_page(session, first_url, proxy_url, headers)
-    
-    if status == 404:
-        return None
-    if status != 200:
-        return f"BLOK: {html if html else status}"
-    
-    kisiler = parse_page_users(html)
-    
+def find_max_page(html, base_tip):
     soup = BeautifulSoup(html, "html.parser")
-    pagination_links = soup.select("div.paginate-pages li a")
-    max_page = 1
-    for a in pagination_links:
-        href = a.get("href", "")
-        match = re.search(r"/page/(\d+)/", href)
-        if match:
-            page_num = int(match.group(1))
-            if page_num > max_page:
-                max_page = page_num
+    # Sayfa numaralarını topla
+    pages = [1]
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if f"/{base_tip}/page/" in href:
+            match = re.search(r'/page/(\d+)/', href)
+            if match:
+                pages.append(int(match.group(1)))
+    return max(pages)
 
-    if max_page > 1:
-        sem = asyncio.Semaphore(4)
-        tasks = [
-            fetch_page(session, f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", proxy_url, headers, sem=sem)
-            for p in range(2, max_page + 1)
-        ]
-        results = await asyncio.gather(*tasks)
-        
-        for st_code, page_res in results:
-            if st_code == 200:
-                kisiler.update(parse_page_users(page_res))
-            else:
-                return f"BLOK: {page_res if page_res else st_code}"
-
-    return kisiler
-
-async def main_async(kullanici_adi, proxy_url):
+async def fetch_single_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"https://letterboxd.com/{kullanici_adi}/",
     }
-    async with AsyncSession() as session:
-        return await asyncio.gather(
-            scrape_target(session, kullanici_adi, "following", proxy_url, headers),
-            scrape_target(session, kullanici_adi, "followers", proxy_url, headers)
-        )
+    proxies = {"http": proxy_url, "https": proxy_url}
+
+    async def _req():
+        last_status = 0
+        for _ in range(max_retries):
+            try:
+                async with AsyncSession() as s:
+                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=16)
+                    if res.status_code == 404:
+                        return 404, ""
+                    if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
+                        return 200, res.text
+                    last_status = res.status_code
+                    await asyncio.sleep(random.uniform(0.4, 0.9))
+            except Exception as e:
+                last_status = str(e)
+                await asyncio.sleep(0.4)
+        return 0, str(last_status)
+
+    if sem:
+        async with sem:
+            return await _req()
+    return await _req()
+
+async def scrape_target(kullanici_adi, tip, proxy_url):
+    first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
+    status, html = await fetch_single_page(first_url, proxy_url, kullanici_adi)
+
+    if status == 404:
+        return None
+    if status != 200:
+        return f"BLOK: {html if html else status}"
+
+    kisiler = parse_page_users(html)
+    max_page = find_max_page(html, tip)
+
+    if max_page > 1:
+        sem = asyncio.Semaphore(5)
+        tasks = [
+            fetch_single_page(
+                f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/",
+                proxy_url,
+                kullanici_adi,
+                sem=sem
+            )
+            for p in range(2, max_page + 1)
+        ]
+        results = await asyncio.gather(*tasks)
+
+        for st_code, page_html in results:
+            if st_code == 200:
+                kisiler.update(parse_page_users(page_html))
+            else:
+                return f"BLOK: Sayfa çekilemedi ({st_code})"
+
+    return kisiler
+
+async def main_async(kullanici_adi, proxy_url):
+    return await asyncio.gather(
+        scrape_target(kullanici_adi, "following", proxy_url),
+        scrape_target(kullanici_adi, "followers", proxy_url)
+    )
 
 def analiz_calistir(kullanici_adi):
     try:
         proxy_url = st.secrets["DATAIMPULSE_PROXY"]
     except Exception:
         return "PROXY_ERROR", "PROXY_ERROR"
-    
+
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
     return loop.run_until_complete(main_async(kullanici_adi, proxy_url))
 
 if st.button("Analizi Başlat 🎬"):
@@ -185,11 +194,11 @@ if st.button("Analizi Başlat 🎬"):
             following, followers = analiz_calistir(cleaned_username)
 
         if following == "PROXY_ERROR" or followers == "PROXY_ERROR":
-            st.error("Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Hata: Proxy Secret Ayarı Yok)")
+            st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Hata: Proxy Secret Ayarı Yok)")
         elif isinstance(following, str) and following.startswith("BLOK"):
-            st.error(f"Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Following {following})")
+            st.error(f"Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Following {following})")
         elif isinstance(followers, str) and followers.startswith("BLOK"):
-            st.error(f"Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Followers {followers})")
+            st.error(f"Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Followers {followers})")
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:

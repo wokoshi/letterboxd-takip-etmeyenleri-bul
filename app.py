@@ -71,26 +71,22 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-USER_BLOCK_RE = re.compile(r'<div class="person-summary">([\s\S]*?)</div>\s*</div>', re.IGNORECASE)
-HREF_RE = re.compile(r'href="/([^"/]+)/"', re.IGNORECASE)
-IMG_RE = re.compile(r'src="([^"]+)"', re.IGNORECASE)
+# Letterboxd person-summary içindeki kullanıcı adı ve avatar regex'i
+USER_ROW_RE = re.compile(r'<div class="person-summary">[\s\S]*?<a class="(?:avatar|name)" href="/([^"/]+)/"[\s\S]*?(?:<img[^>]+src="([^"]+)")?', re.IGNORECASE)
 PAGE_NUM_RE = re.compile(r'/page/(\d+)/', re.IGNORECASE)
 
 def parse_html_fast(html):
     kisiler = {}
-    blocks = USER_BLOCK_RE.findall(html)
-    for b in blocks:
-        u_match = HREF_RE.search(b)
-        if u_match:
-            u = u_match.group(1).lower()
-            if u in ["films", "reviews", "lists", "activity"]:
-                continue
-            img_match = IMG_RE.search(b)
-            img_url = img_match.group(1) if img_match else "https://s.ltrbxd.com/static/img/avatar220.png"
-            kisiler[u] = img_url
+    matches = USER_ROW_RE.findall(html)
+    for u, img in matches:
+        u_clean = u.lower().strip()
+        if u_clean in ["films", "reviews", "lists", "activity", "members"]:
+            continue
+        img_url = img if img else "https://s.ltrbxd.com/static/img/avatar220.png"
+        kisiler[u_clean] = img_url
     return kisiler
 
-def find_pages(html, tip):
+def find_pages(html):
     matches = PAGE_NUM_RE.findall(html)
     if matches:
         return max([int(m) for m in matches])
@@ -102,54 +98,62 @@ def veri_cek(kullanici_adi, tip, proxy_url):
     session = cureq.Session()
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"https://letterboxd.com/{kullanici_adi}/",
     }
 
-    # 1. Sayfa
     first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
     first_ok = False
     html_1 = ""
+    son_hata = ""
 
-    for _ in range(5):
+    for deneme in range(4):
         try:
-            res = session.get(first_url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=12)
+            res = session.get(first_url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=15)
             if res.status_code == 404:
                 return None
-            if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
-                html_1 = res.text
-                first_ok = True
-                break
-            time.sleep(0.5)
-        except Exception:
+            if res.status_code == 200:
+                if "Just a moment" in res.text or "Cloudflare" in res.text:
+                    son_hata = "Cloudflare Challenge"
+                else:
+                    html_1 = res.text
+                    first_ok = True
+                    break
+            else:
+                son_hata = f"HTTP {res.status_code}"
+            time.sleep(1.0)
+        except Exception as e:
+            son_hata = f"Bağlantı Hatası: {str(e)}"
             session = cureq.Session()
-            time.sleep(0.5)
+            time.sleep(1.0)
 
     if not first_ok:
-        return "BLOK"
+        return f"BLOK: 1. sayfa açılamadı ({son_hata})"
 
     kisiler.update(parse_html_fast(html_1))
-    max_page = find_pages(html_1, tip)
+    max_page = find_pages(html_1)
 
-    # Varsa Kalan Sayfalar (Senkron ve seri çekim)
     for p in range(2, max_page + 1):
         page_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/"
         page_ok = False
-        for _ in range(4):
+        p_hata = ""
+        for _ in range(3):
             try:
-                res = session.get(page_url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=12)
+                res = session.get(page_url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=15)
                 if res.status_code == 200 and "Just a moment" not in res.text and "Cloudflare" not in res.text:
                     kisiler.update(parse_html_fast(res.text))
                     page_ok = True
                     break
-                time.sleep(0.3)
-            except Exception:
+                p_hata = f"HTTP {res.status_code}"
+                time.sleep(0.8)
+            except Exception as e:
+                p_hata = str(e)
                 session = cureq.Session()
-                time.sleep(0.4)
+                time.sleep(0.8)
         if not page_ok:
-            return "BLOK"
+            return f"BLOK: Sayfa {p} açılamadı ({p_hata})"
 
     return kisiler
 
@@ -165,14 +169,16 @@ if st.button("Analizi Başlat 🎬"):
                 proxy_url = None
 
             if not proxy_url:
-                st.error("Proxy ayarı bulunamadı.")
+                st.error("Proxy ayarı (Secrets) bulunamadı.")
             else:
                 user_clean = hedef_kullanici.strip().lower()
                 following = veri_cek(user_clean, "following", proxy_url)
                 followers = veri_cek(user_clean, "followers", proxy_url)
 
-                if following == "BLOK" or followers == "BLOK":
-                    st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz.")
+                if isinstance(following, str) and following.startswith("BLOK"):
+                    st.error(f"Following hatası: {following}")
+                elif isinstance(followers, str) and followers.startswith("BLOK"):
+                    st.error(f"Followers hatası: {followers}")
                 elif following is None or followers is None:
                     st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
                 else:
@@ -182,11 +188,9 @@ if st.button("Analizi Başlat 🎬"):
                     if islem_modu == "Beni Takip Etmeyenler":
                         hedef_set = following_set - followers_set
                         sonuc = {u: following[u] for u in hedef_set}
-                        baslik = "Takip etmeyenler"
                     else:
                         hedef_set = followers_set - following_set
                         sonuc = {u: followers[u] for u in hedef_set}
-                        baslik = "Senin takip etmediklerin"
 
                     st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 

@@ -4,7 +4,6 @@ from curl_cffi.requests import AsyncSession
 import asyncio
 import random
 import re
-import string
 
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
@@ -73,17 +72,6 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-def build_proxy(raw_proxy):
-    rand_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    if "@" in raw_proxy:
-        auth, host = raw_proxy.split("@")
-        if "__session-" in auth:
-            auth = re.sub(r"__session-[^:]+", f"__session-{rand_id}", auth)
-        else:
-            auth = f"{auth}__session-{rand_id}"
-        return f"{auth}@{host}"
-    return raw_proxy
-
 def parse_page_users(html):
     soup = BeautifulSoup(html, "html.parser")
     satirlar = soup.find_all("div", class_="person-summary")
@@ -97,31 +85,30 @@ def parse_page_users(html):
             kisiler[username] = img_url
     return kisiler
 
-async def fetch_page(url, raw_proxy, kullanici_adi, max_retries=5, sem=None):
+async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"https://letterboxd.com/{kullanici_adi}/",
     }
+    proxies = {"http": proxy_url, "https": proxy_url}
     
     async def _req():
         last_status = 0
         for _ in range(max_retries):
-            px = build_proxy(raw_proxy)
-            proxies = {"http": px, "https": px}
             try:
                 async with AsyncSession() as s:
-                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=12)
+                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=15)
                     if res.status_code == 404:
                         return 404, ""
                     if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
                         return 200, res.text
                     last_status = res.status_code
-                    await asyncio.sleep(random.uniform(0.4, 0.8))
+                    await asyncio.sleep(random.uniform(0.5, 1.2))
             except Exception as e:
                 last_status = f"ERR: {str(e)}"
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.5)
         return last_status, ""
 
     if sem:
@@ -129,9 +116,9 @@ async def fetch_page(url, raw_proxy, kullanici_adi, max_retries=5, sem=None):
             return await _req()
     return await _req()
 
-async def scrape_target(kullanici_adi, tip, raw_proxy):
+async def scrape_target(kullanici_adi, tip, proxy_url):
     first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
-    status, html = await fetch_page(first_url, raw_proxy, kullanici_adi)
+    status, html = await fetch_page(first_url, proxy_url, kullanici_adi)
     
     if status == 404:
         return None
@@ -154,9 +141,9 @@ async def scrape_target(kullanici_adi, tip, raw_proxy):
                 max_page = page_num
 
     if max_page > 1:
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(4)
         tasks = [
-            fetch_page(f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", raw_proxy, kullanici_adi, sem=sem)
+            fetch_page(f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", proxy_url, kullanici_adi, sem=sem)
             for p in range(2, max_page + 1)
         ]
         results = await asyncio.gather(*tasks)
@@ -169,17 +156,17 @@ async def scrape_target(kullanici_adi, tip, raw_proxy):
 
     return kisiler
 
-async def main_async(kullanici_adi, raw_proxy):
+async def main_async(kullanici_adi, proxy_url):
     res_following, res_followers = await asyncio.gather(
-        scrape_target(kullanici_adi, "following", raw_proxy),
-        scrape_target(kullanici_adi, "followers", raw_proxy)
+        scrape_target(kullanici_adi, "following", proxy_url),
+        scrape_target(kullanici_adi, "followers", proxy_url)
     )
     return res_following, res_followers
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def analiz_calistir(kullanici_adi):
     try:
-        raw_proxy = st.secrets["DATAIMPULSE_PROXY"]
+        proxy_url = st.secrets["DATAIMPULSE_PROXY"]
     except Exception:
         return "PROXY_ERROR", "PROXY_ERROR"
     
@@ -189,7 +176,7 @@ def analiz_calistir(kullanici_adi):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-    return loop.run_until_complete(main_async(kullanici_adi, raw_proxy))
+    return loop.run_until_complete(main_async(kullanici_adi, proxy_url))
 
 if st.button("Analizi Başlat 🎬"):
 

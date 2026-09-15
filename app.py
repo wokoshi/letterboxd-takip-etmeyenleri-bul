@@ -77,12 +77,16 @@ def parse_page_users(html):
     satirlar = soup.find_all("div", class_="person-summary")
     kisiler = {}
     for s in satirlar:
-        a = s.find("a", class_="name")
+        # Doğrudan profile giden linki ve avatarı yakala
+        a = s.find("a", class_="avatar") or s.find("a", class_="name")
         if a and a.get("href"):
-            username = a["href"].strip("/").split("/")[-1].lower()
+            raw_href = a["href"].strip("/")
+            username = raw_href.split("/")[-1].lower()
+            
             img = s.find("img")
-            img_url = img["src"] if img and img.get("src") else "https://s.ltrbxd.com/static/img/avatar220.png"
-            kisiler[username] = img_url
+            img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
+            if username:
+                kisiler[username] = img_url
     return kisiler
 
 async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
@@ -103,7 +107,9 @@ async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
                     if res.status_code == 404:
                         return 404, ""
                     if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
-                        return 200, res.text
+                        # Sayfa geldiyse ama boş bir şablon mu kontrol et
+                        if "person-summary" in res.text or "paginate-pages" in res.text or "No one yet" in res.text:
+                            return 200, res.text
                     last_status = res.status_code
                     await asyncio.sleep(random.uniform(0.5, 1.0))
             except Exception as e:
@@ -139,7 +145,7 @@ async def scrape_target(kullanici_adi, tip, proxy_url):
                 max_page = page_num
 
     if max_page > 1:
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(3)
         tasks = [
             fetch_page(f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", proxy_url, kullanici_adi, sem=sem)
             for p in range(2, max_page + 1)
@@ -161,7 +167,7 @@ async def main_async(kullanici_adi, proxy_url):
     )
     return res_following, res_followers
 
-@st.cache_data(ttl=1800, show_spinner=False)
+# Cache süresini kapattık ki eski hatalı aramaları hafızadan basmasın
 def analiz_calistir(kullanici_adi):
     try:
         proxy_url = st.secrets["DATAIMPULSE_PROXY"]

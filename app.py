@@ -167,17 +167,22 @@ hedef_kullanici = st.text_input(
 # AYARLAR
 # ============================================================
 
-CACHE_VERSION = "v7"
+CACHE_VERSION = "v8"
+
+# 10 dakika cache
 CACHE_TTL = 600
 
-# İstekler arasındaki bekleme.
-MIN_DELAY = 1.0
-MAX_DELAY = 1.8
+# Normal sayfalar arası bekleme
+MIN_DELAY = 1.2
+MAX_DELAY = 2.2
 
-# Aynı sayfa için maksimum tekrar.
+# Normal HTTP hatalarında retry
 MAX_RETRIES = 3
 
-# Sonsuz pagination durumuna karşı güvenlik.
+# Cloudflare durumunda daha uzun bekleme
+CLOUDFLARE_WAIT = 8
+
+# Sonsuz pagination güvenliği
 MAX_PAGES = 500
 
 
@@ -215,13 +220,16 @@ RESERVED_PATHS = {
 
 
 def extract_username(href):
+
     if not href:
         return None
 
     href = href.strip()
 
     if href.startswith("http://") or href.startswith("https://"):
+
         path = href.split("://", 1)[1]
+
         slash_index = path.find("/")
 
         if slash_index == -1:
@@ -236,7 +244,6 @@ def extract_username(href):
     if not path:
         return None
 
-    # Sadece /username/ biçimindeki linkleri al.
     if "/" in path:
         return None
 
@@ -245,8 +252,10 @@ def extract_username(href):
     if username in RESERVED_PATHS:
         return None
 
-    # Letterboxd kullanıcı adları için güvenli karakter filtresi.
-    if not re.fullmatch(r"[a-z0-9_-]+", username):
+    if not re.fullmatch(
+        r"[a-z0-9_-]+",
+        username
+    ):
         return None
 
     return username
@@ -257,6 +266,7 @@ def extract_username(href):
 # ============================================================
 
 def get_avatar(card):
+
     default_avatar = (
         "https://s.ltrbxd.com/static/img/avatar220.png"
     )
@@ -273,6 +283,7 @@ def get_avatar(card):
     ]
 
     for candidate in candidates:
+
         if not candidate:
             continue
 
@@ -287,6 +298,7 @@ def get_avatar(card):
     srcset = img.get("srcset")
 
     if srcset:
+
         first = (
             srcset
             .split(",")[0]
@@ -308,15 +320,21 @@ def get_avatar(card):
 # ============================================================
 
 def parse_users(html):
-    soup = BeautifulSoup(html, "html.parser")
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
 
     users = {}
 
     # --------------------------------------------------------
-    # 1. Eski / klasik Letterboxd yapısı
+    # Klasik Letterboxd yapı
     # --------------------------------------------------------
 
-    cards = soup.select(".person-summary")
+    cards = soup.select(
+        ".person-summary"
+    )
 
     for card in cards:
 
@@ -327,6 +345,7 @@ def parse_users(html):
         )
 
         if not links:
+
             links = card.find_all(
                 "a",
                 href=True
@@ -345,18 +364,15 @@ def parse_users(html):
             users[username] = get_avatar(card)
 
     # --------------------------------------------------------
-    # 2. Güncel yapı için fallback
-    # --------------------------------------------------------
-    #
-    # Letterboxd sayfasında kullanıcı profilleri doğrudan
-    # /username/ linkleri olarak bulunuyor.
-    #
-    # Sadece bir segmentli profil linklerini alıyoruz.
+    # Fallback
     # --------------------------------------------------------
 
     if not users:
 
-        for link in soup.find_all("a", href=True):
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
 
             username = extract_username(
                 link.get("href")
@@ -365,8 +381,8 @@ def parse_users(html):
             if not username:
                 continue
 
-            # Kullanıcı linkinin yakınında avatar var mı?
             parent = link.parent
+
             grandparent = (
                 parent.parent
                 if parent
@@ -378,36 +394,42 @@ def parse_users(html):
                 or parent
             )
 
-            img_exists = False
-
             if candidate_container:
-                img_exists = (
-                    candidate_container.find("img")
-                    is not None
-                )
 
-            if img_exists:
-                users[username] = get_avatar(
-                    candidate_container
-                )
+                if candidate_container.find("img"):
+
+                    users[username] = get_avatar(
+                        candidate_container
+                    )
 
     return users
 
 
 # ============================================================
-# NEXT LINK BUL
+# NEXT URL
 # ============================================================
 
-def get_next_url(html, current_url):
-    soup = BeautifulSoup(html, "html.parser")
+def get_next_url(
+    html,
+    current_url
+):
 
-    # Önce rel="next"
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    # --------------------------------------------------------
+    # rel="next"
+    # --------------------------------------------------------
+
     next_link = soup.find(
         "a",
         rel=lambda value: (
             value
             and "next" in value
-        ) if isinstance(value, list)
+        )
+        if isinstance(value, list)
         else (
             value
             and "next" in value.lower()
@@ -415,13 +437,20 @@ def get_next_url(html, current_url):
     )
 
     if next_link and next_link.get("href"):
+
         return urljoin(
             current_url,
             next_link["href"]
         )
 
-    # Sonra link yazısına bak.
-    for link in soup.find_all("a", href=True):
+    # --------------------------------------------------------
+    # Next yazısı
+    # --------------------------------------------------------
+
+    for link in soup.find_all(
+        "a",
+        href=True
+    ):
 
         text = link.get_text(
             " ",
@@ -440,7 +469,10 @@ def get_next_url(html, current_url):
                 link["href"]
             )
 
-    # Son olarak href'te /page/ geçen linkleri kontrol et.
+    # --------------------------------------------------------
+    # /page/ fallback
+    # --------------------------------------------------------
+
     candidates = []
 
     for link in soup.find_all(
@@ -451,6 +483,7 @@ def get_next_url(html, current_url):
         href = link["href"]
 
         if "/page/" in href:
+
             candidates.append(
                 urljoin(
                     current_url,
@@ -458,8 +491,6 @@ def get_next_url(html, current_url):
                 )
             )
 
-    # Pagination linkleri varsa, mevcut sayfadan
-    # daha büyük page numarasına sahip olanı bul.
     if candidates:
 
         current_match = re.search(
@@ -490,8 +521,12 @@ def get_next_url(html, current_url):
             )
 
             if number > current_page:
+
                 next_candidates.append(
-                    (number, candidate)
+                    (
+                        number,
+                        candidate
+                    )
                 )
 
         if next_candidates:
@@ -506,10 +541,11 @@ def get_next_url(html, current_url):
 
 
 # ============================================================
-# CLOUDFLARE
+# CLOUDFLARE KONTROL
 # ============================================================
 
 def looks_like_cloudflare(html):
+
     if not html:
         return False
 
@@ -520,14 +556,33 @@ def looks_like_cloudflare(html):
         "cf-chl-",
         "challenge-platform",
         "verify you are human",
-        "checking your browser"
+        "checking your browser",
+        "enable javascript and cookies",
+        "attention required"
     ]
 
     for marker in strong_markers:
+
         if marker in text:
             return True
 
     return False
+
+
+# ============================================================
+# CLOUDFLARE HATA MESAJI
+# ============================================================
+
+def cloudflare_error_message(
+    section,
+    page_number
+):
+
+    return (
+        f"Cloudflare doğrulaması nedeniyle "
+        f"{section} listesinin {page_number}. sayfası "
+        f"alınamadı."
+    )
 
 
 # ============================================================
@@ -539,38 +594,91 @@ def fetch_page(
     url,
     proxy_url,
     username,
-    section
+    section,
+    page_number
 ):
+
     headers = {
+
         "Accept": (
             "text/html,application/xhtml+xml,"
             "application/xml;q=0.9,image/avif,"
             "image/webp,*/*;q=0.8"
         ),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": (
+
+        "Accept-Language":
+            "en-US,en;q=0.9",
+
+        "Referer":
             f"https://letterboxd.com/"
-            f"{username}/{section}/"
-        )
+            f"{username}/{section}/",
+
+        "Cache-Control":
+            "no-cache",
+
+        "Pragma":
+            "no-cache"
     }
 
-    last_error = "Bilinmeyen hata"
+    last_error = (
+        "Bilinmeyen hata"
+    )
 
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(
+        MAX_RETRIES
+    ):
 
         try:
 
             response = session.get(
+
                 url,
+
                 proxy=proxy_url,
+
                 impersonate="chrome",
+
                 headers=headers,
+
                 timeout=25,
+
                 allow_redirects=True
             )
 
             status = response.status_code
+
             html = response.text or ""
+
+            # ------------------------------------------------
+            # Cloudflare
+            # ------------------------------------------------
+
+            if looks_like_cloudflare(
+                html
+            ):
+
+                # Cloudflare challenge varsa
+                # aynı sayfayı arka arkaya zorlamıyoruz.
+
+                if attempt == 0:
+
+                    time.sleep(
+                        CLOUDFLARE_WAIT
+                    )
+
+                    continue
+
+                return {
+                    "ok": False,
+                    "status": status,
+                    "html": "",
+                    "error":
+                        cloudflare_error_message(
+                            section,
+                            page_number
+                        ),
+                    "cloudflare": True
+                }
 
             # ------------------------------------------------
             # Başarılı
@@ -578,39 +686,37 @@ def fetch_page(
 
             if status == 200:
 
-                if looks_like_cloudflare(html):
-                    last_error = (
-                        "Cloudflare doğrulama sayfası"
-                    )
-
-                else:
-                    return {
-                        "ok": True,
-                        "status": 200,
-                        "html": html,
-                        "error": None
-                    }
+                return {
+                    "ok": True,
+                    "status": 200,
+                    "html": html,
+                    "error": None,
+                    "cloudflare": False
+                }
 
             # ------------------------------------------------
             # 404
             # ------------------------------------------------
 
-            elif status == 404:
+            if status == 404:
 
                 return {
                     "ok": False,
                     "status": 404,
                     "html": "",
-                    "error": "404"
+                    "error": "404",
+                    "cloudflare": False
                 }
 
             # ------------------------------------------------
             # 403
             # ------------------------------------------------
 
-            elif status == 403:
+            if status == 403:
 
-                last_error = "HTTP 403"
+                last_error = (
+                    "HTTP 403"
+                )
 
             # ------------------------------------------------
             # 429
@@ -618,11 +724,9 @@ def fetch_page(
 
             elif status == 429:
 
-                last_error = "HTTP 429"
-
-            # ------------------------------------------------
-            # Diğer
-            # ------------------------------------------------
+                last_error = (
+                    "HTTP 429 - Too Many Requests"
+                )
 
             else:
 
@@ -631,17 +735,17 @@ def fetch_page(
                 )
 
             # ------------------------------------------------
-            # Retry beklemesi
+            # Retry
             # ------------------------------------------------
 
             if attempt < MAX_RETRIES - 1:
 
                 wait = (
-                    3
-                    + (attempt * 3)
+                    4
+                    + attempt * 4
                     + random.uniform(
-                        0.5,
-                        1.5
+                        1,
+                        2
                     )
                 )
 
@@ -651,26 +755,27 @@ def fetch_page(
 
             last_error = (
                 f"{type(exc).__name__}: "
-                f"{str(exc)[:150]}"
+                f"{str(exc)[:200]}"
             )
 
             if attempt < MAX_RETRIES - 1:
 
                 time.sleep(
-                    3
-                    + (attempt * 2)
+                    4
+                    + attempt * 3
                 )
 
     return {
         "ok": False,
         "status": None,
         "html": "",
-        "error": last_error
+        "error": last_error,
+        "cloudflare": False
     }
 
 
 # ============================================================
-# LISTE TARAMA
+# LİSTE TARAMA
 # ============================================================
 
 def scrape_list(
@@ -679,10 +784,6 @@ def scrape_list(
     section,
     proxy_url
 ):
-    """
-    Letterboxd'ın kendi Next linkini takip ederek
-    bütün sayfaları sırayla çeker.
-    """
 
     current_url = (
         f"https://letterboxd.com/"
@@ -690,13 +791,32 @@ def scrape_list(
     )
 
     all_users = {}
+
     visited_urls = set()
 
     page_count = 0
 
     while page_count < MAX_PAGES:
 
-        # Sonsuz döngü güvenliği.
+        # ----------------------------------------------------
+        # Sayfa numarası
+        # ----------------------------------------------------
+
+        current_match = re.search(
+            r"/page/(\d+)",
+            current_url
+        )
+
+        page_number = (
+            int(current_match.group(1))
+            if current_match
+            else 1
+        )
+
+        # ----------------------------------------------------
+        # Aynı URL kontrolü
+        # ----------------------------------------------------
+
         if current_url in visited_urls:
 
             return {
@@ -704,7 +824,8 @@ def scrape_list(
                 "users": {},
                 "pages": page_count,
                 "error": (
-                    "Pagination aynı URL'ye geri döndü."
+                    "Pagination aynı URL'ye "
+                    "geri döndü."
                 )
             }
 
@@ -712,7 +833,10 @@ def scrape_list(
             current_url
         )
 
-        # İlk sayfa dışındaki isteklerde bekle.
+        # ----------------------------------------------------
+        # Sayfalar arası bekleme
+        # ----------------------------------------------------
+
         if page_count > 0:
 
             time.sleep(
@@ -722,16 +846,27 @@ def scrape_list(
                 )
             )
 
+        # ----------------------------------------------------
+        # Sayfayı çek
+        # ----------------------------------------------------
+
         result = fetch_page(
+
             session=session,
+
             url=current_url,
+
             proxy_url=proxy_url,
+
             username=username,
-            section=section
+
+            section=section,
+
+            page_number=page_number
         )
 
         # ----------------------------------------------------
-        # İlk sayfa 404 = kullanıcı yok.
+        # Kullanıcı bulunamadı
         # ----------------------------------------------------
 
         if (
@@ -743,11 +878,28 @@ def scrape_list(
                 "ok": False,
                 "users": {},
                 "pages": 0,
-                "error": "USER_NOT_FOUND"
+                "error":
+                    "USER_NOT_FOUND"
             }
 
         # ----------------------------------------------------
-        # Herhangi bir sayfa alınamadı.
+        # Cloudflare
+        # ----------------------------------------------------
+
+        if result.get(
+            "cloudflare",
+            False
+        ):
+
+            return {
+                "ok": False,
+                "users": {},
+                "pages": page_count,
+                "error": result["error"]
+            }
+
+        # ----------------------------------------------------
+        # Genel hata
         # ----------------------------------------------------
 
         if not result["ok"]:
@@ -764,15 +916,22 @@ def scrape_list(
 
         html = result["html"]
 
+        # ----------------------------------------------------
+        # Kullanıcıları parse et
+        # ----------------------------------------------------
+
         page_users = parse_users(
             html
         )
 
         # ----------------------------------------------------
-        # İlk sayfa boş olabilir.
+        # İlk sayfa boş
         # ----------------------------------------------------
 
-        if page_count == 0 and not page_users:
+        if (
+            page_count == 0
+            and not page_users
+        ):
 
             return {
                 "ok": True,
@@ -782,10 +941,13 @@ def scrape_list(
             }
 
         # ----------------------------------------------------
-        # Sonraki sayfa boşsa güvenli şekilde hata ver.
+        # Sonraki sayfa boş
         # ----------------------------------------------------
 
-        if page_count > 0 and not page_users:
+        if (
+            page_count > 0
+            and not page_users
+        ):
 
             return {
                 "ok": False,
@@ -793,12 +955,13 @@ def scrape_list(
                 "pages": page_count,
                 "error": (
                     f"{section} listesinin "
-                    f"{page_count + 1}. sayfası boş döndü."
+                    f"{page_number}. sayfası "
+                    f"boş döndü."
                 )
             }
 
         # ----------------------------------------------------
-        # Yeni kullanıcıları ekle.
+        # Kullanıcıları ekle
         # ----------------------------------------------------
 
         before_count = len(
@@ -813,8 +976,10 @@ def scrape_list(
             all_users
         )
 
-        # Aynı kullanıcılar tekrar geldiyse
-        # pagination'ın ilerlemediğini kontrol et.
+        # ----------------------------------------------------
+        # Pagination ilerlemiyor mu?
+        # ----------------------------------------------------
+
         if (
             page_count > 0
             and after_count == before_count
@@ -825,16 +990,16 @@ def scrape_list(
                 "users": {},
                 "pages": page_count,
                 "error": (
-                    f"{section} listesinde "
-                    f"{page_count + 1}. sayfa yeni "
-                    f"kullanıcı getirmedi."
+                    f"{section} listesinin "
+                    f"{page_number}. sayfası "
+                    f"yeni kullanıcı getirmedi."
                 )
             }
 
         page_count += 1
 
         # ----------------------------------------------------
-        # Letterboxd'ın kendi NEXT linki.
+        # Next URL
         # ----------------------------------------------------
 
         next_url = get_next_url(
@@ -845,7 +1010,6 @@ def scrape_list(
         if not next_url:
             break
 
-        # Next aynı URL ise dur.
         if next_url == current_url:
             break
 
@@ -883,14 +1047,6 @@ def run_analysis(
     username,
     proxy_url
 ):
-    """
-    Tek session:
-        Following tamamen çekilir
-        ↓
-        Followers tamamen çekilir
-        ↓
-        karşılaştırılır
-    """
 
     session = Session()
 
@@ -901,9 +1057,13 @@ def run_analysis(
         # ----------------------------------------------------
 
         following = scrape_list(
+
             session=session,
+
             username=username,
+
             section="following",
+
             proxy_url=proxy_url
         )
 
@@ -912,8 +1072,11 @@ def run_analysis(
             return {
                 "ok": False,
                 "error": (
-                    "Following taraması tamamlanamadı: "
-                    + str(following["error"])
+                    "Following taraması "
+                    "tamamlanamadı: "
+                    + str(
+                        following["error"]
+                    )
                 )
             }
 
@@ -922,9 +1085,13 @@ def run_analysis(
         # ----------------------------------------------------
 
         followers = scrape_list(
+
             session=session,
+
             username=username,
+
             section="followers",
+
             proxy_url=proxy_url
         )
 
@@ -933,18 +1100,23 @@ def run_analysis(
             return {
                 "ok": False,
                 "error": (
-                    "Followers taraması tamamlanamadı: "
-                    + str(followers["error"])
+                    "Followers taraması "
+                    "tamamlanamadı: "
+                    + str(
+                        followers["error"]
+                    )
                 )
             }
 
         # ----------------------------------------------------
-        # Sadece iki liste de bittikten sonra döndür.
+        # Başarılı
         # ----------------------------------------------------
 
         return {
             "ok": True,
+
             "following": following,
+
             "followers": followers
         }
 
@@ -965,6 +1137,7 @@ def analiz_calistir(
     username,
     cache_version
 ):
+
     try:
 
         proxy_url = st.secrets[
@@ -1023,8 +1196,8 @@ if st.button(
 
         with st.spinner(
             "Tarama başlatılıyor... "
-            "Following ve followers listeleri "
-            "tamamen alınıyor."
+            "Following ve followers "
+            "listeleri tamamen alınıyor."
         ):
 
             data = analiz_calistir(
@@ -1045,11 +1218,26 @@ if st.button(
         elif not data["ok"]:
 
             st.error(
-                "Analiz güvenli şekilde tamamlanamadı."
+                "Analiz tamamlanamadı."
             )
 
+            error_text = str(
+                data["error"]
+            )
+
+            # Cloudflare'a özel açıklama
+            if "Cloudflare" in error_text:
+
+                st.warning(
+                    "Letterboxd şu anda proxy "
+                    "üzerinden gelen isteği "
+                    "doğrulama sayfasına yönlendirdi. "
+                    "Bu nedenle eksik listeyle sonuç "
+                    "gösterilmedi."
+                )
+
             st.caption(
-                str(data["error"])
+                error_text
             )
 
         else:
@@ -1080,22 +1268,32 @@ if st.button(
             ):
 
                 sonuc = {
+
                     user: following[user]
+
                     for user in following
+
                     if user not in followers
                 }
 
-                baslik = "Takip etmeyenler"
+                baslik = (
+                    "Takip etmeyenler"
+                )
 
             else:
 
                 sonuc = {
+
                     user: followers[user]
+
                     for user in followers
+
                     if user not in following
                 }
 
-                baslik = "Senin takip etmediklerin"
+                baslik = (
+                    "Senin takip etmediklerin"
+                )
 
             # =================================================
             # BİLGİ

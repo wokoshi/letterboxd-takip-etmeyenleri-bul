@@ -72,25 +72,76 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
+# Letterboxd sistem ve menü uzantıları
+YASAKLI_LINKLER = {
+    "films", "reviews", "lists", "activity", "members", "following", 
+    "followers", "likes", "watchlist", "diary", "tags", "about", ""
+}
+
 def parse_page_users(html):
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
         
-    satirlar = soup.find_all("div", class_="person-summary")
     kisiler = {}
+    
+    # Sağ kenar çubuğunu ele; sadece ana tablo/liste gövdesine odaklan
+    ana_icerik = soup.find("table", class_="person-table") or soup.find("section", id="content") or soup.find("div", id="content")
+    if not ana_icerik:
+        ana_icerik = soup
+
+    satirlar = ana_icerik.select("td.table-person, div.person-summary")
+    
     for s in satirlar:
-        a = s.find("a", class_="avatar") or s.find("a", class_="name")
+        # Sidebar/kenar çubuğu içindeyse atla
+        if s.find_parent("aside") or s.find_parent("div", class_="sidebar"):
+            continue
+
+        a = s.find("a", class_="name") or s.find("a", class_="avatar")
         if a and a.get("href"):
             raw_href = a["href"].strip("/")
-            username = raw_href.split("/")[-1].lower()
+            parts = [p for p in raw_href.split("/") if p]
+            if not parts:
+                continue
+            username = parts[-1].lower()
             
+            if username in YASAKLI_LINKLER:
+                continue
+                
             img = s.find("img")
             img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
             if username:
                 kisiler[username] = img_url
+                
     return kisiler
+
+def extract_max_page(html):
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+        
+    max_page = 1
+    # Sayfadaki tüm olası sayfalama linklerini tara (li a, paginate-page, paginate-next vb.)
+    linkler = soup.select(".paginate-pages a, .pagination a, div.pagination li a, a.paginate-page")
+    
+    for a in linkler:
+        href = a.get("href", "")
+        match = re.search(r"/page/(\d+)/", href)
+        if match:
+            p = int(match.group(1))
+            if p > max_page:
+                max_page = p
+                
+        # Link metni sadece sayı olan durumlar için
+        text = a.get_text(strip=True)
+        if text.isdigit():
+            p = int(text)
+            if p > max_page:
+                max_page = p
+                
+    return max_page
 
 async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
     headers = {
@@ -110,7 +161,7 @@ async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
                     if res.status_code == 404:
                         return 404, ""
                     if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
-                        if "person-summary" in res.text or "paginate-pages" in res.text or "No one yet" in res.text:
+                        if "person-summary" in res.text or "table-person" in res.text or "paginate-pages" in res.text or "pagination" in res.text or "No one yet" in res.text:
                             return 200, res.text
                     last_status = res.status_code
                     await asyncio.sleep(random.uniform(0.25, 0.45))
@@ -134,22 +185,9 @@ async def scrape_target(kullanici_adi, tip, proxy_url):
         return f"BLOK: {status}"
     
     kisiler = parse_page_users(html)
-    
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
-        
-    pagination_links = soup.select("div.paginate-pages li a")
-    max_page = 1
-    for a in pagination_links:
-        href = a.get("href", "")
-        match = re.search(r"/page/(\d+)/", href)
-        if match:
-            page_num = int(match.group(1))
-            if page_num > max_page:
-                max_page = page_num
+    max_page = extract_max_page(html)
 
+    # 2. ve sonraki sayfalar varsa aynı güvenli hızda çek
     if max_page > 1:
         sem = asyncio.Semaphore(3)
         tasks = [

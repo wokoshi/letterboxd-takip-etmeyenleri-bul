@@ -1,3 +1,4 @@
+```python
 import asyncio
 import random
 import re
@@ -10,7 +11,7 @@ from curl_cffi.requests import AsyncSession
 
 
 # ============================================================
-# STREAMLIT
+# STREAMLIT AYARLARI
 # ============================================================
 
 st.set_page_config(
@@ -146,7 +147,7 @@ st.markdown(
 
 
 # ============================================================
-# KULLANICI ARAYÜZÜ
+# KULLANICI AYARLARI
 # ============================================================
 
 islem_modu = st.radio(
@@ -165,40 +166,29 @@ hedef_kullanici = st.text_input(
 
 
 # ============================================================
-# AYARLAR
+# GENEL AYARLAR
 # ============================================================
 
-CACHE_VERSION = "v5"
+# Kod değiştiğinde eski cache kullanılmasın.
+CACHE_VERSION = "v6"
 
-# Free Streamlit için aynı hesabı tekrar tekrar taramasın.
+# Free Streamlit için 10 dakika.
 CACHE_TTL = 600
 
-# İstekler arasında küçük bekleme.
-MIN_DELAY = 0.7
-MAX_DELAY = 1.2
+# İstekler arasında küçük insan-benzeri bekleme.
+MIN_DELAY = 0.8
+MAX_DELAY = 1.4
 
-# Geçici boş/şüpheli sayfa için tekrar deneme.
-PAGE_RETRIES = 3
+# Şüpheli cevaplarda kaç kez tekrar denenecek.
+MAX_RETRIES = 3
 
 # Güvenlik sınırı.
 MAX_PAGES = 500
 
 
 # ============================================================
-# YARDIMCI FONKSİYONLAR
+# URL'DEN USERNAME ÇIKARMA
 # ============================================================
-
-def normalize_url(url):
-    if not url:
-        return None
-
-    url = url.strip()
-
-    if url.startswith("//"):
-        return "https:" + url
-
-    return url
-
 
 def extract_username(href):
     if not href:
@@ -221,13 +211,16 @@ def extract_username(href):
     if not path:
         return None
 
-    # Profil linki tek path segmentinden oluşmalı.
+    # /username/ gibi tek segmentli profil linkleri.
     if "/" in path:
         return None
 
-    username = path.lower()
+    username = path.strip()
 
-    # Letterboxd'ın sistem sayfaları.
+    if not username:
+        return None
+
+    # Letterboxd navigasyon yolları.
     reserved = {
         "films",
         "lists",
@@ -247,22 +240,30 @@ def extract_username(href):
         "features",
         "login",
         "signup",
+        "search",
+        "films-liked",
+        "films-watched"
     }
 
-    if username in reserved:
+    if username.lower() in reserved:
         return None
 
-    if not re.fullmatch(r"[a-z0-9_-]+", username):
-        return None
-
-    return username
+    return username.lower()
 
 
-def get_image(person):
-    img = person.find("img")
+# ============================================================
+# AVATAR
+# ============================================================
+
+def extract_avatar(card):
+    img = card.find("img")
+
+    default_avatar = (
+        "https://s.ltrbxd.com/static/img/avatar220.png"
+    )
 
     if not img:
-        return "https://s.ltrbxd.com/static/img/avatar220.png"
+        return default_avatar
 
     candidates = [
         img.get("src"),
@@ -270,26 +271,37 @@ def get_image(person):
         img.get("data-original")
     ]
 
-    for candidate in candidates:
-        candidate = normalize_url(candidate)
+    for url in candidates:
+        if url:
+            url = url.strip()
 
-        if candidate:
-            return candidate
+            if url.startswith("//"):
+                url = "https:" + url
+
+            if url.startswith("http"):
+                return url
 
     srcset = img.get("srcset")
 
     if srcset:
-        first = srcset.split(",")[0].strip().split(" ")[0]
-        first = normalize_url(first)
+        first = (
+            srcset
+            .split(",")[0]
+            .strip()
+            .split(" ")[0]
+        )
 
-        if first:
+        if first.startswith("//"):
+            first = "https:" + first
+
+        if first.startswith("http"):
             return first
 
-    return "https://s.ltrbxd.com/static/img/avatar220.png"
+    return default_avatar
 
 
 # ============================================================
-# SAYFADAN KULLANICILARI ÇIKART
+# SAYFADAKİ KULLANICILARI PARSE ET
 # ============================================================
 
 def parse_page_users(html):
@@ -304,17 +316,26 @@ def parse_page_users(html):
     cards = soup.select("div.person-summary")
 
     for card in cards:
+
         username = None
 
-        # Önce avatar / name linklerini dene.
-        links = card.select("a.avatar, a.name")
+        # Öncelikle avatar ve isim linklerini dene.
+        links = card.select(
+            "a.avatar, a.name"
+        )
 
-        # Bulamazsak kartın içindeki bütün linkleri dene.
+        # Olmazsa kartın içindeki linklere bak.
         if not links:
-            links = card.find_all("a", href=True)
+            links = card.find_all(
+                "a",
+                href=True
+            )
 
         for link in links:
-            username = extract_username(link.get("href"))
+
+            username = extract_username(
+                link.get("href")
+            )
 
             if username:
                 break
@@ -322,41 +343,19 @@ def parse_page_users(html):
         if not username:
             continue
 
-        users[username] = get_image(card)
-
-    # --------------------------------------------------------
-    # Fallback
-    # --------------------------------------------------------
-    #
-    # HTML yapısı değişirse doğrudan profil linklerini deniyoruz.
-    # --------------------------------------------------------
-
-    if not users:
-        for link in soup.find_all("a", href=True):
-
-            username = extract_username(link.get("href"))
-
-            if not username:
-                continue
-
-            parent = link.parent
-
-            has_image = False
-
-            if parent:
-                has_image = parent.find("img") is not None
-
-            if has_image:
-                users[username] = get_image(parent)
+        users[username] = extract_avatar(card)
 
     return users
 
 
 # ============================================================
-# CLOUDLFARE / SAYFA DOĞRULAMA
+# CLOUDFLARE KONTROLÜ
 # ============================================================
 
-def is_cloudflare(html):
+def is_cloudflare_page(html):
+    if not html:
+        return False
+
     text = html.lower()
 
     markers = [
@@ -376,37 +375,8 @@ def is_cloudflare(html):
     return False
 
 
-def is_valid_letterboxd_html(html):
-    if not html:
-        return False
-
-    if is_cloudflare(html):
-        return False
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Sayfa title.
-    if soup.title:
-        title = soup.title.get_text(" ", strip=True).lower()
-
-        if "letterboxd" in title:
-            return True
-
-    # Kişi kartları.
-    if soup.select("div.person-summary"):
-        return True
-
-    # Pagination elementleri.
-    if soup.select(
-        ".paginate-pages, .pagination, nav.pagination"
-    ):
-        return True
-
-    return False
-
-
 # ============================================================
-# MAKSİMUM SAYFA NUMARASI
+# MAX PAGE BUL
 # ============================================================
 
 def detect_max_page(html):
@@ -426,14 +396,21 @@ def detect_max_page(html):
 
         for pattern in patterns:
 
-            match = re.search(pattern, href)
+            match = re.search(
+                pattern,
+                href
+            )
 
             if match:
                 try:
-                    number = int(match.group(1))
+                    number = int(
+                        match.group(1)
+                    )
 
-                    if number > max_page:
-                        max_page = number
+                    max_page = max(
+                        max_page,
+                        number
+                    )
 
                 except ValueError:
                     pass
@@ -442,7 +419,7 @@ def detect_max_page(html):
 
 
 # ============================================================
-# TEK SAYFA FETCH
+# TEK SAYFAYI ÇEK
 # ============================================================
 
 async def fetch_page(
@@ -457,7 +434,7 @@ async def fetch_page(
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/146.0.0.0 Safari/537.36"
+            "Chrome/140.0.0.0 Safari/537.36"
         ),
         "Accept": (
             "text/html,application/xhtml+xml,"
@@ -468,21 +445,29 @@ async def fetch_page(
         "Referer": (
             f"https://letterboxd.com/"
             f"{username}/{section}/"
-        )
+        ),
+        "Connection": "keep-alive"
+    }
+
+    # curl_cffi dokümantasyonuna uygun.
+    proxies = {
+        "http": proxy_url,
+        "https": proxy_url
     }
 
     last_error = "Bilinmeyen hata"
 
-    for attempt in range(PAGE_RETRIES):
+    for attempt in range(MAX_RETRIES):
 
         try:
 
             response = await session.get(
                 url,
-                proxy=proxy_url,
+                proxies=proxies,
                 impersonate="chrome",
                 headers=headers,
-                timeout=20
+                timeout=20,
+                allow_redirects=True
             )
 
             status = response.status_code
@@ -506,50 +491,69 @@ async def fetch_page(
                 }
 
             # ------------------------------------------------
-            # Başarılı ve gerçek Letterboxd sayfası
+            # 200
+            # ------------------------------------------------
+            #
+            # Burada artık HTML'i fazla katı kontrol etmiyoruz.
+            # Cloudflare sayfası değilse kabul ediyoruz.
             # ------------------------------------------------
 
-            if status == 200 and is_valid_letterboxd_html(html):
+            if status == 200:
 
-                return {
-                    "status": "OK",
-                    "html": html
-                }
+                if is_cloudflare_page(html):
+
+                    last_error = (
+                        "Cloudflare doğrulama sayfası"
+                    )
+
+                else:
+
+                    return {
+                        "status": "OK",
+                        "html": html
+                    }
 
             # ------------------------------------------------
-            # Cloudflare / şüpheli cevap
+            # 403 / 429
             # ------------------------------------------------
 
-            if status == 403:
+            elif status == 403:
+
                 last_error = "HTTP 403"
 
             elif status == 429:
+
                 last_error = "HTTP 429"
 
-            elif status >= 500:
-                last_error = f"HTTP {status}"
+            # ------------------------------------------------
+            # Sunucu hataları
+            # ------------------------------------------------
 
-            elif status == 200:
-                last_error = "Geçersiz veya eksik HTML"
+            elif status >= 500:
+
+                last_error = f"HTTP {status}"
 
             else:
+
                 last_error = f"HTTP {status}"
 
-            # Giderek biraz daha uzun bekle.
+            # Retry beklemesi
             await asyncio.sleep(
-                2.0 * (attempt + 1)
-                + random.uniform(0.5, 1.2)
+                2.0
+                + (attempt * 2.0)
+                + random.uniform(0.4, 1.2)
             )
 
         except Exception as exc:
 
             last_error = (
                 f"{type(exc).__name__}: "
-                f"{str(exc)[:120]}"
+                f"{str(exc)[:150]}"
             )
 
             await asyncio.sleep(
-                2.0 * (attempt + 1)
+                2.0
+                + (attempt * 2.0)
             )
 
     return {
@@ -559,7 +563,7 @@ async def fetch_page(
 
 
 # ============================================================
-# FOLLOWING / FOLLOWERS TAMAMEN ÇEK
+# FOLLOWING / FOLLOWERS TARAMA
 # ============================================================
 
 async def scrape_target(
@@ -568,14 +572,24 @@ async def scrape_target(
     section,
     proxy_url
 ):
+    """
+    Listeyi sayfa sayfa toplar.
+
+    Önemli:
+    - Sayfalar sırayla çekilir.
+    - Paralel pagination yoktur.
+    - Bir sayfa eksikse sonuç güvenilir kabul edilmez.
+    - Tüm liste tamamlanmadan karşılaştırma yapılmaz.
+    """
+
     first_url = (
         f"https://letterboxd.com/"
         f"{username}/{section}/"
     )
 
-    # --------------------------------------------------------
-    # 1. sayfa
-    # --------------------------------------------------------
+    # ========================================================
+    # 1. SAYFA
+    # ========================================================
 
     first = await fetch_page(
         session=session,
@@ -587,6 +601,7 @@ async def scrape_target(
     )
 
     if first["status"] == "USER_NOT_FOUND":
+
         return {
             "error": "USER_NOT_FOUND",
             "users": {},
@@ -594,6 +609,7 @@ async def scrape_target(
         }
 
     if first["status"] != "OK":
+
         return {
             "error": first["html"],
             "users": {},
@@ -606,27 +622,36 @@ async def scrape_target(
 
     users = dict(first_users)
 
-    # Gerçekten hiç kimse yoksa.
+    detected_max = detect_max_page(
+        first["html"]
+    )
+
+    # ========================================================
+    # BOŞ LİSTE
+    # ========================================================
+
     if not first_users:
+
         return {
             "error": None,
             "users": {},
             "pages": 1
         }
 
-    # İlk sayfadan bilinen maksimum sayıyı bul.
-    detected_max = detect_max_page(
-        first["html"]
-    )
+    # ========================================================
+    # SONRAKİ SAYFALAR
+    # ========================================================
 
     page = 2
 
     while page <= MAX_PAGES:
 
-        # Eğer pagination açık şekilde toplam sayıyı
-        # söylüyorsa gereksiz sayfalara gitme.
-        if detected_max > 1 and page > detected_max:
-            break
+        # İlk sayfada toplam sayfa belli olduysa
+        # gereksiz istek atma.
+        if detected_max > 1:
+
+            if page > detected_max:
+                break
 
         url = (
             f"https://letterboxd.com/"
@@ -634,14 +659,14 @@ async def scrape_target(
             f"page/{page}/"
         )
 
-        result = None
-        page_users = {}
+        page_users = None
+        page_status = None
 
         # ----------------------------------------------------
-        # Aynı sayfayı gerektiğinde yeniden dene.
+        # SAYFAYI AL
         # ----------------------------------------------------
 
-        for retry in range(PAGE_RETRIES):
+        for attempt in range(MAX_RETRIES):
 
             await asyncio.sleep(
                 random.uniform(
@@ -659,12 +684,21 @@ async def scrape_target(
                 page_number=page
             )
 
-            # Son sayfa.
-            if result["status"] == "END":
+            page_status = result["status"]
+
+            # ------------------------------------------------
+            # Gerçek son sayfa
+            # ------------------------------------------------
+
+            if page_status == "END":
+                page_users = {}
                 break
 
-            # Başarılı sayfa.
-            if result["status"] == "OK":
+            # ------------------------------------------------
+            # Başarılı sayfa
+            # ------------------------------------------------
+
+            if page_status == "OK":
 
                 page_users = parse_page_users(
                     result["html"]
@@ -674,44 +708,53 @@ async def scrape_target(
                 if page_users:
                     break
 
-                # HTML geldi ama kişi bulunamadı.
+                # 200 geldi ama kullanıcı kartı çıkmadı.
+                # Hemen bitirmiyoruz.
+                if attempt < MAX_RETRIES - 1:
+
+                    await asyncio.sleep(
+                        2.0
+                        + random.uniform(
+                            0.5,
+                            1.0
+                        )
+                    )
+
+                    continue
+
+                # Retry bitti.
+                page_users = {}
+
+                break
+
+            # ------------------------------------------------
+            # Hata
+            # ------------------------------------------------
+
+            if attempt < MAX_RETRIES - 1:
+
                 await asyncio.sleep(
-                    2.0 + random.uniform(0.5, 1.0)
+                    2.0
+                    + (attempt * 2.0)
                 )
 
                 continue
 
-            # Sayfa hatası.
-            if result["status"] in (
-                "ERROR",
-            ):
+        # ====================================================
+        # 404 -> SON
+        # ====================================================
 
-                if retry < PAGE_RETRIES - 1:
-                    await asyncio.sleep(
-                        2.5 + retry * 2
-                    )
-                    continue
+        if page_status == "END":
 
-                return {
-                    "error": (
-                        f"{result['html']} "
-                        f"(sayfa {page})"
-                    ),
-                    "users": {},
-                    "pages": page - 1
-                }
-
-        # ----------------------------------------------------
-        # Gerçek 404 / listenin sonu
-        # ----------------------------------------------------
-
-        if result and result["status"] == "END":
-
+            # Eğer Letterboxd ilk sayfada bu sayfanın
+            # var olduğunu söylüyorsa tutarsızlık var.
             if detected_max >= page:
+
                 return {
                     "error": (
                         f"{section} listesinde "
-                        f"{page}. sayfa beklenirken 404 döndü."
+                        f"{page}. sayfa bekleniyordu "
+                        f"ama 404 döndü."
                     ),
                     "users": {},
                     "pages": page - 1
@@ -719,41 +762,43 @@ async def scrape_target(
 
             break
 
-        # ----------------------------------------------------
-        # Sayfa kullanıcı içermedi
-        # ----------------------------------------------------
+        # ====================================================
+        # SAYFA HİÇ KULLANICI VERMEDİ
+        # ====================================================
 
         if not page_users:
 
-            # Eğer ilk sayfadaki pagination toplam sayfa
-            # sayısını söylüyorsa burada durmak güvenli değil.
+            # İlk sayfada toplam sayfa bilgisi varsa,
+            # boş sayfa normal değildir.
             if detected_max >= page:
 
                 return {
                     "error": (
-                        f"{section} listesinde "
-                        f"{page}. sayfa alınamadı. "
+                        f"{section} listesinin "
+                        f"{page}. sayfası alınamadı. "
                         f"Eksik veriyle analiz yapılmadı."
                     ),
                     "users": {},
                     "pages": page - 1
                 }
 
-            # Pagination bilinmiyorsa bu son sayfa olabilir.
+            # Toplam sayfa bilgisi yoksa,
+            # boş sayfayı son kabul et.
             break
 
-        # ----------------------------------------------------
-        # Pagination gerçekten ilerliyor mu?
-        # ----------------------------------------------------
+        # ====================================================
+        # AYNI KULLANICILAR MI GELDİ?
+        # ====================================================
 
         new_users = {}
 
         for user, avatar in page_users.items():
+
             if user not in users:
                 new_users[user] = avatar
 
-        # Sayfa tamamen eski kullanıcıları döndürüyorsa
-        # pagination ilerlemiyor demektir.
+        # Sayfa önceki sayfanın aynısıysa
+        # pagination ilerlemiyor.
         if not new_users:
 
             if detected_max >= page:
@@ -761,9 +806,8 @@ async def scrape_target(
                 return {
                     "error": (
                         f"{section} listesinde "
-                        f"{page}. sayfa önceki sayfayla "
-                        f"aynı kullanıcıları döndürdü. "
-                        f"Pagination güvenilir değil."
+                        f"{page}. sayfa yeni kullanıcı "
+                        f"getirmedi. Pagination güvenilir değil."
                     ),
                     "users": {},
                     "pages": page - 1
@@ -771,14 +815,26 @@ async def scrape_target(
 
             break
 
-        # Yeni kullanıcıları ekle.
+        # ====================================================
+        # YENİ KULLANICILARI EKLE
+        # ====================================================
+
         users.update(new_users)
 
-        # Eğer bilinen son sayfaya ulaştıysak bitir.
-        if detected_max > 1 and page >= detected_max:
-            break
+        # ====================================================
+        # SON SAYFAYA ULAŞILDI
+        # ====================================================
+
+        if detected_max > 1:
+
+            if page >= detected_max:
+                break
 
         page += 1
+
+    # ========================================================
+    # SONUÇ
+    # ========================================================
 
     return {
         "error": None,
@@ -788,15 +844,23 @@ async def scrape_target(
 
 
 # ============================================================
-# ANA ASYNC
+# ANA SCRAPER
 # ============================================================
 
-async def run_analysis(username, proxy_url):
+async def run_analysis(
+    username,
+    proxy_url
+):
+    """
+    Following tamamen biter.
+    Ardından followers tamamen biter.
+    Ardından karşılaştırma yapılır.
+    """
 
     async with AsyncSession() as session:
 
         # ====================================================
-        # ÖNCE FOLLOWING
+        # FOLLOWING
         # ====================================================
 
         following = await scrape_target(
@@ -806,14 +870,14 @@ async def run_analysis(username, proxy_url):
             proxy_url=proxy_url
         )
 
-        # Kullanıcı bulunamadı.
         if following["error"] == "USER_NOT_FOUND":
+
             return {
                 "error": "USER_NOT_FOUND"
             }
 
-        # Following tamamlanamadıysa dur.
         if following["error"]:
+
             return {
                 "error": (
                     "Following taraması tamamlanamadı: "
@@ -822,7 +886,7 @@ async def run_analysis(username, proxy_url):
             }
 
         # ====================================================
-        # SONRA FOLLOWERS
+        # FOLLOWERS
         # ====================================================
 
         followers = await scrape_target(
@@ -833,6 +897,7 @@ async def run_analysis(username, proxy_url):
         )
 
         if followers["error"]:
+
             return {
                 "error": (
                     "Followers taraması tamamlanamadı: "
@@ -841,7 +906,7 @@ async def run_analysis(username, proxy_url):
             }
 
         # ====================================================
-        # SADECE İKİSİ DE TAMAMLANINCA SONUÇ
+        # İKİSİ DE TAMAM
         # ====================================================
 
         return {
@@ -852,7 +917,7 @@ async def run_analysis(username, proxy_url):
 
 
 # ============================================================
-# CACHE'Lİ ANALİZ
+# CACHE
 # ============================================================
 
 @st.cache_data(
@@ -864,23 +929,30 @@ def analiz_calistir(
     cache_version
 ):
     try:
+
         proxy_url = st.secrets[
             "DATAIMPULSE_PROXY"
         ]
+
     except Exception:
+
         return {
             "error": "PROXY_ERROR"
         }
 
     try:
-        return asyncio.run(
+
+        result = asyncio.run(
             run_analysis(
                 username,
                 proxy_url
             )
         )
 
+        return result
+
     except Exception as exc:
+
         return {
             "error": (
                 f"{type(exc).__name__}: "
@@ -890,13 +962,17 @@ def analiz_calistir(
 
 
 # ============================================================
-# BUTON
+# ANALİZ BUTONU
 # ============================================================
 
 if st.button(
     "Analizi Başlat 🎬",
     use_container_width=True
 ):
+
+    # --------------------------------------------------------
+    # Kullanıcı adı kontrolü
+    # --------------------------------------------------------
 
     if not hedef_kullanici.strip():
 
@@ -916,8 +992,8 @@ if st.button(
 
         with st.spinner(
             "Tarama başlatılıyor... "
-            "Önce following, ardından followers "
-            "eksiksiz şekilde taranıyor."
+            "Following ve followers listeleri "
+            "eksiksiz şekilde alınıyor."
         ):
 
             data = analiz_calistir(
@@ -926,16 +1002,19 @@ if st.button(
             )
 
         # ====================================================
-        # HATALAR
+        # PROXY HATASI
         # ====================================================
 
         if data["error"] == "PROXY_ERROR":
 
             st.error(
-                "Proxy ayarı bulunamadı. "
-                "Streamlit Secrets bölümünde "
-                "DATAIMPULSE_PROXY kontrol edilmeli."
+                "DATAIMPULSE_PROXY bulunamadı. "
+                "Streamlit Secrets ayarınızı kontrol edin."
             )
+
+        # ====================================================
+        # KULLANICI BULUNAMADI
+        # ====================================================
 
         elif data["error"] == "USER_NOT_FOUND":
 
@@ -943,6 +1022,10 @@ if st.button(
                 "Bu kullanıcı bulunamadı. "
                 "Kullanıcı adınızı kontrol ediniz."
             )
+
+        # ====================================================
+        # TARAMA HATASI
+        # ====================================================
 
         elif data["error"]:
 
@@ -954,17 +1037,35 @@ if st.button(
                 str(data["error"])
             )
 
+        # ====================================================
+        # BAŞARILI
+        # ====================================================
+
         else:
 
-            following_data = data["following"]
-            followers_data = data["followers"]
+            following_data = data[
+                "following"
+            ]
 
-            following = following_data["users"]
-            followers = followers_data["users"]
+            followers_data = data[
+                "followers"
+            ]
+
+            following = following_data[
+                "users"
+            ]
+
+            followers = followers_data[
+                "users"
+            ]
 
             # =================================================
-            # ÖNEMLİ:
-            # İKİ LİSTE TAMAMEN ÇEKİLDİKTEN SONRA FARK
+            # KARŞILAŞTIRMA
+            # =================================================
+            #
+            # DİKKAT:
+            # Bu noktaya ancak iki liste de tamamen bittikten
+            # sonra geliyoruz.
             # =================================================
 
             if (
@@ -1013,6 +1114,10 @@ if st.button(
                 unsafe_allow_html=True
             )
 
+            # =================================================
+            # BAŞARILI
+            # =================================================
+
             st.markdown(
                 f"""
                 <div class="success-box">
@@ -1037,16 +1142,16 @@ if st.button(
                     "Bu kriterlere uyan kişi bulunamadı."
                 )
 
+            # =================================================
+            # SONUÇLAR
+            # =================================================
+
             else:
 
                 users = sorted(
                     sonuc.items(),
                     key=lambda item: item[0]
                 )
-
-                # =================================================
-                # 2 SÜTUN
-                # =================================================
 
                 for i in range(
                     0,
@@ -1063,7 +1168,9 @@ if st.button(
                         if index >= len(users):
                             continue
 
-                        username, image_url = users[index]
+                        username, image_url = users[
+                            index
+                        ]
 
                         safe_username = escape(
                             username
@@ -1120,3 +1227,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+```

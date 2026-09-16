@@ -6,7 +6,6 @@ import os
 
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
-# Playwright tarayıcısını Streamlit Cloud üzerinde hazırla
 @st.cache_resource
 def setup_playwright():
     os.system("playwright install chromium")
@@ -86,29 +85,40 @@ def parse_page_users(html):
     soup = BeautifulSoup(html, "html.parser")
     kisiler = {}
     
-    # Sidebar veya önerilen 9 kişiyi kesinlikle alma
-    ana_alan = soup.find("table", class_="person-table") or soup.find("section", id="content") or soup.find("div", id="content") or soup
-    satirlar = ana_alan.find_all("div", class_="person-summary")
-    
-    for s in satirlar:
-        if s.find_parent("aside") or s.find_parent("div", class_="sidebar"):
-            continue
-            
-        a = s.find("a", class_="avatar") or s.find("a", class_="name")
+    # SADECE ve SADECE ana tablonun hücrelerini alıyoruz.
+    # Bu seçim kenar çubuğundaki (sidebar) 9 öneri profilini %100 eler.
+    table = soup.find("table", class_="person-table")
+    if not table:
+        return kisiler
+
+    # Her satırdaki kişi hücresi
+    cells = table.select("td.table-person")
+    for cell in cells:
+        a = cell.find("a", class_="name") or cell.find("a", class_="avatar")
         if a and a.get("href"):
-            raw_href = a["href"].strip("/")
-            parts = [p for p in raw_href.split("/") if p]
-            if not parts:
+            raw_href = a["href"].strip("/").split("/")
+            if not raw_href:
                 continue
-            username = parts[-1].lower()
+            username = raw_href[-1].lower()
             if username in YASAKLI:
                 continue
                 
-            img = s.find("img")
+            img = cell.find("img")
             img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
             kisiler[username] = img_url
             
     return kisiler
+
+def check_has_next_page(html, current_page):
+    soup = BeautifulSoup(html, "html.parser")
+    # 1. 'Next' butonu var mı?
+    if soup.select("a.next, .paginate-next a, a[rel='next']"):
+        return True
+    # 2. Bir sonraki sayfa numarasının linki mevcut mu?
+    next_page_str = f"/page/{current_page + 1}/"
+    if soup.find("a", href=lambda h: h and next_page_str in h):
+        return True
+    return False
 
 async def scrape_letterboxd(kullanici_adi, tip):
     kisiler = {}
@@ -119,7 +129,6 @@ async def scrape_letterboxd(kullanici_adi, tip):
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
         )
-        # Gerçek tarayıcı context'i oluşturarak Cloudflare testlerini aşar
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
@@ -136,25 +145,23 @@ async def scrape_letterboxd(kullanici_adi, tip):
                         return None
                     break
                 
-                # Cloudflare challenge kontrolü
                 await web_page.wait_for_timeout(1500)
                 content = await web_page.content()
                 
                 if "Just a moment..." in content or "Checking your browser" in content:
-                    # Cloudflare doğrulaması için 3 saniye daha bekle
                     await web_page.wait_for_timeout(3000)
                     content = await web_page.content()
 
                 parsed = parse_page_users(content)
-                if not parsed and page > 1:
+                
+                # Tablodan veri gelmediyse veya boşsa dur
+                if not parsed:
                     break
                     
                 kisiler.update(parsed)
                 
-                # Sonraki sayfa kontrolü
-                soup = BeautifulSoup(content, "html.parser")
-                has_next = soup.select("a.next, .paginate-next a, a[rel='next']")
-                if not has_next:
+                # Sayfada sonraki sayfa işareti yoksa döngüyü bitir
+                if not check_has_next_page(content, page):
                     break
                     
                 page += 1
@@ -170,7 +177,7 @@ async def main_async(kullanici_adi):
     if isinstance(res_following, str) and res_following.startswith("HATA"):
         return res_following, None
         
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.5)
     res_followers = await scrape_letterboxd(kullanici_adi, "followers")
     return res_following, res_followers
 
@@ -186,7 +193,7 @@ if st.button("Analizi Başlat 🎬"):
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
-        with st.spinner("Tarama başlatılıyor... Cloudflare doğrulaması gerçek tarayıcı ile geçiliyor, lütfen bekleyiniz."):
+        with st.spinner("Tarama yapılıyor... Lütfen bekleyiniz."):
             cleaned_username = hedef_kullanici.strip().lower()
             following, followers = analiz_calistir(cleaned_username)
 

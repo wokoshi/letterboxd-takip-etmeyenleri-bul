@@ -85,7 +85,7 @@ def parse_page_users(html):
         
     kisiler = {}
     
-    # Sadece ana gövdedeki gerçek kullanıcı tablosu
+    # Sadece ana gövdeye odaklan (sidebar/öneri kutularını dışarıda bırak)
     ana_icerik = soup.find("table", class_="person-table") or soup.find("section", id="content") or soup.find("div", id="content")
     if not ana_icerik:
         ana_icerik = soup
@@ -139,31 +139,33 @@ def extract_max_page(html):
                 
     return max_page
 
-async def fetch_page(url, kullanici_adi, max_retries=4, sem=None):
+async def fetch_page(url, proxy_url, kullanici_adi, max_retries=4, sem=None):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"https://letterboxd.com/{kullanici_adi}/",
     }
+    proxies = {"http": proxy_url, "https": proxy_url}
     
     async def _req():
         last_status = 0
-        for _ in range(max_retries):
+        for attempt in range(max_retries):
             try:
+                # İstekler arasında insan refleksi gecikmesi
+                await asyncio.sleep(random.uniform(0.3, 0.7))
                 async with AsyncSession() as s:
-                    # PROXYSIZ DIRECT REQUEST
-                    res = await s.get(url, impersonate="chrome124", headers=headers, timeout=12)
+                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=14)
                     if res.status_code == 404:
                         return 404, ""
                     if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
                         if "person-summary" in res.text or "table-person" in res.text or "paginate-pages" in res.text or "pagination" in res.text or "No one yet" in res.text:
                             return 200, res.text
                     last_status = res.status_code
-                    await asyncio.sleep(random.uniform(0.3, 0.6))
+                    await asyncio.sleep(0.8 + (attempt * 0.4))
             except Exception as e:
                 last_status = f"ERR: {str(e)}"
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.5)
         return last_status, ""
 
     if sem:
@@ -171,9 +173,9 @@ async def fetch_page(url, kullanici_adi, max_retries=4, sem=None):
             return await _req()
     return await _req()
 
-async def scrape_target(kullanici_adi, tip):
+async def scrape_target(kullanici_adi, tip, proxy_url):
     first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
-    status, html = await fetch_page(first_url, kullanici_adi)
+    status, html = await fetch_page(first_url, proxy_url, kullanici_adi)
     
     if status == 404:
         return None
@@ -184,9 +186,10 @@ async def scrape_target(kullanici_adi, tip):
     max_page = extract_max_page(html)
 
     if max_page > 1:
+        # İstekleri 2'li gruplarla sakin çekiyoruz
         sem = asyncio.Semaphore(2)
         tasks = [
-            fetch_page(f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", kullanici_adi, sem=sem)
+            fetch_page(f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", proxy_url, kullanici_adi, sem=sem)
             for p in range(2, max_page + 1)
         ]
         results = await asyncio.gather(*tasks)
@@ -199,53 +202,66 @@ async def scrape_target(kullanici_adi, tip):
 
     return kisiler
 
-async def main_async(kullanici_adi):
-    # Sırayla çekiyoruz, sunucuya yük binmesin
-    res_following = await scrape_target(kullanici_adi, "following")
+async def main_async(kullanici_adi, proxy_url):
+    res_following = await scrape_target(kullanici_adi, "following", proxy_url)
     if isinstance(res_following, str) and res_following.startswith("BLOK"):
         return res_following, None
         
-    await asyncio.sleep(0.5)
-    res_followers = await scrape_target(kullanici_adi, "followers")
+    await asyncio.sleep(0.6)
+    res_followers = await scrape_target(kullanici_adi, "followers", proxy_url)
     return res_following, res_followers
 
 def analiz_calistir(kullanici_adi):
+    try:
+        proxy_url = st.secrets["DATAIMPULSE_PROXY"]
+    except Exception:
+        return "PROXY_ERROR", "PROXY_ERROR"
+    
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-    return loop.run_until_complete(main_async(kullanici_adi))
+    return loop.run_until_complete(main_async(kullanici_adi, proxy_url))
 
 if st.button("Analizi Başlat 🎬"):
+
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
-        with st.spinner("Tarama yapılıyor... Lütfen bekleyiniz."):
+        with st.spinner("Tarama başlatılıyor... Lütfen bekleyiniz."):
             cleaned_username = hedef_kullanici.strip().lower()
             following, followers = analiz_calistir(cleaned_username)
 
-        if isinstance(following, str) and following.startswith("BLOK"):
+        if following == "PROXY_ERROR" or followers == "PROXY_ERROR":
+            st.error("Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Hata: Proxy Secret Ayarı Yok)")
+        elif isinstance(following, str) and following.startswith("BLOK"):
             st.error(f"Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Following {following})")
         elif isinstance(followers, str) and followers.startswith("BLOK"):
             st.error(f"Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Followers {followers})")
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
+
             if islem_modu == "Beni Takip Etmeyenler":
                 sonuc = {u: following[u] for u in following if u not in followers}
+                baslik = "Takip etmeyenler"
             else:
                 sonuc = {u: followers[u] for u in followers if u not in following}
+                baslik = "Senin takip etmediklerin"
 
             st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 
             users = list(sonuc.items())
+
             for i in range(0, len(users), 2):
                 cols = st.columns(2)
+
                 for j in range(2):
                     if i + j < len(users):
                         usr, img = users[i+j]
+
                         with cols[j]:
                             st.markdown(f"""
                             <div class="card">

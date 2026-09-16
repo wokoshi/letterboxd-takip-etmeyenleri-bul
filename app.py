@@ -89,7 +89,7 @@ def parse_page_users(html):
                 kisiler[username] = img_url
     return kisiler
 
-async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
+async def fetch_page(session, url, proxy_url, kullanici_adi, max_retries=5, sem=None):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -100,21 +100,27 @@ async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
 
     async def _req():
         last_status = 0
-        for _ in range(max_retries):
+        for attempt in range(max_retries):
             try:
-                async with AsyncSession() as s:
-                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=15)
-                    if res.status_code == 404:
-                        return 404, ""
-                    if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
-                        # Sayfa geldiyse ama boş bir şablon mu kontrol et
-                        if "person-summary" in res.text or "paginate-pages" in res.text or "No one yet" in res.text:
-                            return 200, res.text
-                        # Sayfa gerçekten boşsa (aralık dışı sayfa) - bunu da başarı say,
-                        # boş kişi listesi olarak yorumlanacak (retry'ye gerek yok)
-                        if res.status_code == 200:
-                            return 200, res.text
-                    last_status = res.status_code
+                # İstekleri paralel ateşlerken hepsi aynı anda gitmesin diye
+                # ufak, rastgele bir başlangıç gecikmesi
+                await asyncio.sleep(random.uniform(0.15, 0.6))
+
+                # Aynı hedef için paylaşılan session kullanıyoruz ki
+                # Cloudflare'ın verdiği cookie/clearance sayfalar arasında taşınsın
+                res = await session.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=15)
+
+                if res.status_code == 404:
+                    return 404, ""
+                if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
+                    return 200, res.text
+
+                last_status = res.status_code
+                if res.status_code == 403:
+                    # 403 = Cloudflare/anti-bot bloğu. Hemen tekrar denemek
+                    # genelde aynı sonucu verir, daha uzun bekleyip tekrar deneriz.
+                    await asyncio.sleep(random.uniform(3.0, 6.0) * (attempt + 1))
+                else:
                     await asyncio.sleep(random.uniform(0.5, 1.0))
             except Exception as e:
                 last_status = f"ERR: {str(e)}"
@@ -127,60 +133,66 @@ async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
     return await _req()
 
 async def scrape_target(kullanici_adi, tip, proxy_url):
-    first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
-    status, html = await fetch_page(first_url, proxy_url, kullanici_adi)
+    # Bir hedef (following/followers) için TÜM sayfalarda aynı session'ı
+    # kullanıyoruz ki Cloudflare'ın 1. sayfada verdiği cookie/clearance
+    # sonraki sayfalara da taşınsın (403'lerin başlıca sebebi buydu).
+    async with AsyncSession() as session:
+        first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
+        status, html = await fetch_page(session, first_url, proxy_url, kullanici_adi)
 
-    if status == 404:
-        return None
-    if status != 200:
-        return f"BLOK: {status}"
+        if status == 404:
+            return None
+        if status != 200:
+            return f"BLOK: {status}"
 
-    kisiler = parse_page_users(html)
+        kisiler = parse_page_users(html)
 
-    # İlk sayfa boşsa (hiç takipçi/takip edilen yoksa) direkt dön
-    if not kisiler:
-        return kisiler
+        # İlk sayfa boşsa (hiç takipçi/takip edilen yoksa) direkt dön
+        if not kisiler:
+            return kisiler
 
-    # --- YENİ PAGINATION MANTIĞI ---
-    # Letterboxd artık numaralı sayfa linkleri (1 2 3 4 ...) sunmuyor,
-    # bu yüzden toplam sayfa sayısını önceden kestirmiyoruz.
-    # Bunun yerine 4'erli gruplar halinde paralel istek atıp,
-    # bir grup içinde boş/404 bir sayfaya rastlayana kadar devam ediyoruz.
-    sem = asyncio.Semaphore(3)
-    page = 2
-    batch_size = 4
+        # --- PAGINATION MANTIĞI ---
+        # Letterboxd artık numaralı sayfa linkleri (1 2 3 4 ...) sunmuyor,
+        # bu yüzden toplam sayfa sayısını önceden kestirmiyoruz.
+        # Küçük gruplar halinde istek atıp, bir grup içinde boş/404
+        # bir sayfaya rastlayana kadar devam ediyoruz. Eşzamanlılık
+        # bilinçli olarak düşük tutuluyor (403 riskini azaltmak için).
+        sem = asyncio.Semaphore(2)
+        page = 2
+        batch_size = 2
 
-    while True:
-        page_numbers = list(range(page, page + batch_size))
-        tasks = [
-            fetch_page(
-                f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/",
-                proxy_url, kullanici_adi, sem=sem
-            )
-            for p in page_numbers
-        ]
-        results = await asyncio.gather(*tasks)
+        while True:
+            page_numbers = list(range(page, page + batch_size))
+            tasks = [
+                fetch_page(
+                    session,
+                    f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/",
+                    proxy_url, kullanici_adi, sem=sem
+                )
+                for p in page_numbers
+            ]
+            results = await asyncio.gather(*tasks)
 
-        reached_end = False
-        for p, (st_code, page_html) in zip(page_numbers, results):
-            if st_code == 404:
-                reached_end = True
-                continue
-            if st_code != 200:
-                return f"BLOK: {st_code} (sayfa {p})"
+            reached_end = False
+            for p, (st_code, page_html) in zip(page_numbers, results):
+                if st_code == 404:
+                    reached_end = True
+                    continue
+                if st_code != 200:
+                    return f"BLOK: {st_code} (sayfa {p})"
 
-            page_users = parse_page_users(page_html)
-            if not page_users:
-                # Bu sayfa boş -> listenin sonuna gelmişiz demektir
-                reached_end = True
-                continue
+                page_users = parse_page_users(page_html)
+                if not page_users:
+                    # Bu sayfa boş -> listenin sonuna gelmişiz demektir
+                    reached_end = True
+                    continue
 
-            kisiler.update(page_users)
+                kisiler.update(page_users)
 
-        if reached_end:
-            break
+            if reached_end:
+                break
 
-        page += batch_size
+            page += batch_size
 
     return kisiler
 

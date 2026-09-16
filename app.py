@@ -72,7 +72,7 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-# Letterboxd sistem URL'leri (kullanıcı değildir, elenmesi gerekir)
+# Letterboxd sistem URL'leri (kullanıcı değildir, temizlenmesi gerekir)
 SISTEM_URL_ENGEL = {
     "films", "reviews", "lists", "activity", "members", "following", 
     "followers", "likes", "watchlist", "diary", "tags", "stats", ""
@@ -85,12 +85,9 @@ def parse_page_users(html):
         soup = BeautifulSoup(html, "html.parser")
         
     kisiler = {}
-    
-    # Letterboxd takipçi/takip tablosundaki satırlar
     satirlar = soup.select(".person-summary, td.table-person")
     
     for s in satirlar:
-        # İsim veya avatar linkini al
         link = s.select_one("a.name, h3.title a, a.avatar")
         if not link or not link.get("href"):
             continue
@@ -101,11 +98,9 @@ def parse_page_users(html):
             
         username = href_parts[-1].lower()
         
-        # Fazladan eklenen sistem linklerini filtrele
         if username in SISTEM_URL_ENGEL:
             continue
             
-        # Avatar görseli bul
         img = s.select_one("img")
         img_url = "https://s.ltrbxd.com/static/img/avatar220.png"
         if img:
@@ -122,8 +117,7 @@ def extract_max_page(html):
         soup = BeautifulSoup(html, "html.parser")
         
     max_page = 1
-    # Tüm sayfalama varyasyonlarını tara (paginate-pages, pagination, paginate-nextprev)
-    pagination_links = soup.select(".paginate-pages a, .pagination a, div.pagination li a")
+    pagination_links = soup.select(".paginate-pages a, .pagination a, div.pagination li a, .paginate-nextprev a")
     
     for a in pagination_links:
         href = a.get("href", "")
@@ -133,7 +127,6 @@ def extract_max_page(html):
             if p > max_page:
                 max_page = p
                 
-        # Link metni doğrudan sayıysa
         text = a.get_text(strip=True)
         if text.isdigit():
             p = int(text)
@@ -143,28 +136,38 @@ def extract_max_page(html):
     return max_page
 
 async def fetch_page(session, url, kullanici_adi, max_retries=4, sem=None):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
+    # curl_cffi kendi TLS parmak izini ürettiği için sahte User-Agent vermiyoruz
+    extra_headers = {
         "Referer": f"https://letterboxd.com/{kullanici_adi}/",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
     }
     
     async def _req():
         last_status = 0
         for attempt in range(max_retries):
             try:
-                res = await session.get(url, impersonate="chrome120", headers=headers, timeout=12)
+                await asyncio.sleep(random.uniform(0.1, 0.3))
+                res = await session.get(
+                    url, 
+                    impersonate="chrome124", 
+                    headers=extra_headers, 
+                    timeout=15
+                )
+                
                 if res.status_code == 404:
                     return 404, ""
+                    
                 if res.status_code == 200 and "Just a moment" not in res.text:
                     if "person-summary" in res.text or "paginate-pages" in res.text or "table-person" in res.text or "No one yet" in res.text:
                         return 200, res.text
+                        
                 last_status = res.status_code
-                await asyncio.sleep(0.2 + (attempt * 0.2))
+                await asyncio.sleep(0.5 + (attempt * 0.5))
             except Exception as e:
                 last_status = f"ERR: {str(e)}"
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
         return last_status, ""
 
     if sem:
@@ -184,7 +187,6 @@ async def scrape_target(session, kullanici_adi, tip, sem):
     kisiler = parse_page_users(html)
     max_page = extract_max_page(html)
 
-    # 2. ve sonraki sayfaları çek
     if max_page > 1:
         tasks = [
             fetch_page(session, f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", kullanici_adi, sem=sem)
@@ -202,7 +204,8 @@ async def scrape_target(session, kullanici_adi, tip, sem):
 
 async def main_async(kullanici_adi, proxy_url):
     proxies = {"http": proxy_url, "https": proxy_url}
-    sem = asyncio.Semaphore(5)
+    # Cloudflare rate-limit yememek için eşzamanlı sayfa çekimini 4'te sabitliyoruz
+    sem = asyncio.Semaphore(4)
     
     async with AsyncSession(proxies=proxies) as session:
         res_following, res_followers = await asyncio.gather(

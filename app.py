@@ -85,16 +85,14 @@ def parse_page_users(html):
     soup = BeautifulSoup(html, "html.parser")
     kisiler = {}
     
-    # SADECE ve SADECE ana tablonun hücrelerini alıyoruz.
-    # Bu seçim kenar çubuğundaki (sidebar) 9 öneri profilini %100 eler.
-    table = soup.find("table", class_="person-table")
-    if not table:
-        return kisiler
-
-    # Her satırdaki kişi hücresi
-    cells = table.select("td.table-person")
-    for cell in cells:
-        a = cell.find("a", class_="name") or cell.find("a", class_="avatar")
+    # 1. Kenar çubuğunu (sidebar) HTML'den kökten kazı (o 9 sahte kişiyi yok et)
+    for sidebar in soup.select("aside, .sidebar, #sidebar, div.sidebar, section.sidebar"):
+        sidebar.decompose()
+        
+    # 2. Artık sayfada sadece ana akış kaldı; tüm person-summary kartlarını al
+    satirlar = soup.find_all("div", class_="person-summary")
+    for s in satirlar:
+        a = s.find("a", class_="avatar") or s.find("a", class_="name")
         if a and a.get("href"):
             raw_href = a["href"].strip("/").split("/")
             if not raw_href:
@@ -103,26 +101,35 @@ def parse_page_users(html):
             if username in YASAKLI:
                 continue
                 
-            img = cell.find("img")
+            img = s.find("img")
             img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
             kisiler[username] = img_url
             
     return kisiler
 
-def check_has_next_page(html, current_page):
+def extract_total_pages(html):
     soup = BeautifulSoup(html, "html.parser")
-    # 1. 'Next' butonu var mı?
-    if soup.select("a.next, .paginate-next a, a[rel='next']"):
-        return True
-    # 2. Bir sonraki sayfa numarasının linki mevcut mu?
-    next_page_str = f"/page/{current_page + 1}/"
-    if soup.find("a", href=lambda h: h and next_page_str in h):
-        return True
-    return False
+    max_page = 1
+    
+    # Letterboxd sayfalandırma linklerini yakala
+    for a in soup.select(".paginate-pages a, .pagination a, a.paginate-page"):
+        href = a.get("href", "")
+        match = re.search(r"/page/(\d+)/", href)
+        if match:
+            p = int(match.group(1))
+            if p > max_page:
+                max_page = p
+        
+        text = a.get_text(strip=True)
+        if text.isdigit():
+            p = int(text)
+            if p > max_page:
+                max_page = p
+                
+    return max_page
 
 async def scrape_letterboxd(kullanici_adi, tip):
     kisiler = {}
-    page = 1
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -134,40 +141,36 @@ async def scrape_letterboxd(kullanici_adi, tip):
         )
         web_page = await context.new_page()
 
-        while True:
-            url = f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{page}/" if page > 1 else f"https://letterboxd.com/{kullanici_adi}/{tip}/"
-            
-            try:
-                response = await web_page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                if response and response.status == 404:
-                    if page == 1:
-                        await browser.close()
-                        return None
-                    break
-                
-                await web_page.wait_for_timeout(1500)
-                content = await web_page.content()
-                
-                if "Just a moment..." in content or "Checking your browser" in content:
-                    await web_page.wait_for_timeout(3000)
-                    content = await web_page.content()
-
-                parsed = parse_page_users(content)
-                
-                # Tablodan veri gelmediyse veya boşsa dur
-                if not parsed:
-                    break
-                    
-                kisiler.update(parsed)
-                
-                # Sayfada sonraki sayfa işareti yoksa döngüyü bitir
-                if not check_has_next_page(content, page):
-                    break
-                    
-                page += 1
-            except Exception as e:
+        # 1. İlk sayfayı yükle
+        first_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/"
+        try:
+            res = await web_page.goto(first_url, wait_until="domcontentloaded", timeout=30000)
+            if res and res.status == 404:
                 await browser.close()
-                return f"HATA: {str(e)}"
+                return None
+                
+            await web_page.wait_for_timeout(1500)
+            content = await web_page.content()
+            
+            if "Just a moment..." in content or "Checking your browser" in content:
+                await web_page.wait_for_timeout(3000)
+                content = await web_page.content()
+
+            kisiler.update(parse_page_users(content))
+            total_pages = extract_total_pages(content)
+            
+            # 2. Eğer birden fazla sayfa varsa sırayla gez
+            if total_pages > 1:
+                for page_num in range(2, total_pages + 1):
+                    next_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{page_num}/"
+                    await web_page.goto(next_url, wait_until="domcontentloaded", timeout=30000)
+                    await web_page.wait_for_timeout(1000)
+                    page_content = await web_page.content()
+                    kisiler.update(parse_page_users(page_content))
+                    
+        except Exception as e:
+            await browser.close()
+            return f"HATA: {str(e)}"
 
         await browser.close()
     return kisiler

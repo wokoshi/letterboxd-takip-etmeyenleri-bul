@@ -72,16 +72,15 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-YASAKLI = {"films", "reviews", "lists", "activity", "members", "following", "followers", "likes", "watchlist", "diary", "tags", ""}
+YASAKLI = {"films", "reviews", "lists", "activity", "members", "following", "followers", "likes", "watchlist", "diary", "tags", "about", ""}
 
 def parse_page_users(html):
     soup = BeautifulSoup(html, "html.parser")
     kisiler = {}
+    satirlar = soup.select(".person-summary, td.table-person")
     
-    # Sadece tablo veya özet listesindeki gerçek kartlar
-    items = soup.select(".person-summary, td.table-person")
-    for el in items:
-        link = el.select_one("a.name, a.avatar")
+    for s in satirlar:
+        link = s.select_one("a.name, a.avatar")
         if not link or not link.get("href"):
             continue
             
@@ -93,7 +92,7 @@ def parse_page_users(html):
         if username in YASAKLI:
             continue
             
-        img = el.select_one("img")
+        img = s.select_one("img")
         img_url = img.get("src") if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
         kisiler[username] = img_url
         
@@ -102,8 +101,7 @@ def parse_page_users(html):
 def extract_max_page(html):
     soup = BeautifulSoup(html, "html.parser")
     max_page = 1
-    links = soup.select("a[href*='/page/']")
-    for a in links:
+    for a in soup.select("a[href*='/page/']"):
         match = re.search(r"/page/(\d+)/", a.get("href", ""))
         if match:
             p = int(match.group(1))
@@ -111,29 +109,29 @@ def extract_max_page(html):
                 max_page = p
     return max_page
 
-async def fetch_page(url, proxy_url, max_retries=5, sem=None):
+async def fetch_page(url, proxy_url, max_retries=4, sem=None):
     proxies = {"http": proxy_url, "https": proxy_url}
     
     async def _req():
         last_status = 0
         for attempt in range(max_retries):
             try:
-                # Cloudflare burst yakalamasın diye minik gecikme
-                await asyncio.sleep(random.uniform(0.2, 0.5))
+                # Cloudflare burst korumasına takılmamak için jitter
+                await asyncio.sleep(random.uniform(0.3, 0.7))
                 async with AsyncSession() as s:
-                    # Manuel headers YOK: impersonate="chrome120" saf TLS ve doğru HTTP başlıklarını kendi basar
-                    res = await s.get(url, proxies=proxies, impersonate="chrome120", timeout=15)
+                    # chrome120 Cloudflare tarafından işaretlendiyse chrome124 en temiz TLS parmak izini verir
+                    res = await s.get(url, proxies=proxies, impersonate="chrome124", timeout=12)
                     
                     if res.status_code == 404:
                         return 404, ""
                     if res.status_code == 200 and "Just a moment" not in res.text:
                         return 200, res.text
-                    
+                        
                     last_status = res.status_code
-                    await asyncio.sleep(1.0 + (attempt * 0.5))
+                    await asyncio.sleep(0.8 + (attempt * 0.4))
             except Exception as e:
                 last_status = f"ERR: {str(e)}"
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.5)
         return last_status, ""
 
     if sem:
@@ -169,12 +167,15 @@ async def scrape_target(kullanici_adi, tip, proxy_url, sem):
     return kisiler
 
 async def main_async(kullanici_adi, proxy_url):
-    # Eşzamanlı istek sınırını 2 tutuyoruz ki proxy aynı anda Letterboxd'ı boğup 403 almasın
+    # Eşzamanlı isteği 2'de tutarak Cloudflare ban riskini sıfıra indiriyoruz
     sem = asyncio.Semaphore(2)
     
-    # İki listeyi art arda (önce following, sonra followers) çekiyoruz
+    # Sırayla çekim: Önce following, 0.4 sn dinlenme, sonra followers
     res_following = await scrape_target(kullanici_adi, "following", proxy_url, sem)
-    await asyncio.sleep(0.5)
+    if isinstance(res_following, str) and res_following.startswith("BLOK"):
+        return res_following, None
+        
+    await asyncio.sleep(0.4)
     res_followers = await scrape_target(kullanici_adi, "followers", proxy_url, sem)
     
     return res_following, res_followers
@@ -212,8 +213,10 @@ if st.button("Analizi Başlat 🎬"):
         else:
             if islem_modu == "Beni Takip Etmeyenler":
                 sonuc = {u: following[u] for u in following if u not in followers}
+                baslik = "Takip etmeyenler"
             else:
                 sonuc = {u: followers[u] for u in followers if u not in following}
+                baslik = "Senin takip etmediklerin"
 
             st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 

@@ -72,22 +72,84 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
+YASAKLI_LINKLER = {
+    "films", "reviews", "lists", "activity", "members", "following", 
+    "followers", "likes", "watchlist", "diary", "tags", "about", "stats", ""
+}
+
 def parse_page_users(html):
     soup = BeautifulSoup(html, "html.parser")
-    satirlar = soup.find_all("div", class_="person-summary")
     kisiler = {}
+    
+    # 1. Ana tablo veya ana gövdeyi sınırla (sidebar'ı kesinlikle alma)
+    ana_alan = soup.find("table", class_="person-table") or soup.find("section", id="content") or soup.find("div", id="content")
+    if not ana_alan:
+        ana_alan = soup
+
+    satirlar = ana_alan.find_all("div", class_="person-summary")
+    
     for s in satirlar:
-        # Doğrudan profile giden linki ve avatarı yakala
+        # Kenar çubuğu içindeki elemanları tamamen ele
+        if s.find_parent("aside") or s.find_parent("div", class_="sidebar") or s.find_parent("section", class_="sidebar"):
+            continue
+            
         a = s.find("a", class_="avatar") or s.find("a", class_="name")
         if a and a.get("href"):
             raw_href = a["href"].strip("/")
-            username = raw_href.split("/")[-1].lower()
+            parts = [p for p in raw_href.split("/") if p]
+            if not parts:
+                continue
+            username = parts[-1].lower()
             
+            if username in YASAKLI_LINKLER:
+                continue
+                
             img = s.find("img")
             img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
             if username:
                 kisiler[username] = img_url
     return kisiler
+
+def extract_max_page(html):
+    soup = BeautifulSoup(html, "html.parser")
+    max_page = 1
+    
+    # Letterboxd'ın sayfalama konteynerleri: .paginate-pages, .pagination, .paginate-nextprev
+    # 1. Yöntem: Sayfalama konteyneri içindeki tüm li ve a etiketlerindeki sayıları topla
+    pagination_containers = soup.select(".paginate-pages, .pagination, div.paginate-pages, ul.paginate-pages")
+    for container in pagination_containers:
+        for tag in container.find_all(["li", "a"]):
+            # URL içindeki /page/X/ kontrolü
+            href = tag.get("href", "")
+            match = re.search(r"/page/(\d+)/", href)
+            if match:
+                p = int(match.group(1))
+                if p > max_page:
+                    max_page = p
+            
+            # Etiket içindeki doğrudan metin sayısı kontrolü
+            text = tag.get_text(strip=True)
+            if text.isdigit():
+                p = int(text)
+                if p > max_page:
+                    max_page = p
+                    
+    # 2. Yöntem: Genel HTML içinde kaçırılan herhangi bir /page/X/ linki varsa al
+    if max_page == 1:
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "/page/" in href:
+                match = re.search(r"/page/(\d+)/", href)
+                if match:
+                    p = int(match.group(1))
+                    if p > max_page:
+                        max_page = p
+
+    # 3. Yöntem: Next butonu var ama sayfa sayısı tespit edilemediyse en az 2 sayfa vardır
+    if max_page == 1 and soup.select("a.next, .paginate-next a, a[rel='next']"):
+        max_page = 2
+        
+    return max_page
 
 async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
     headers = {
@@ -107,8 +169,7 @@ async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
                     if res.status_code == 404:
                         return 404, ""
                     if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
-                        # Sayfa geldiyse ama boş bir şablon mu kontrol et
-                        if "person-summary" in res.text or "paginate-pages" in res.text or "No one yet" in res.text:
+                        if "person-summary" in res.text or "paginate-pages" in res.text or "pagination" in res.text or "No one yet" in res.text:
                             return 200, res.text
                     last_status = res.status_code
                     await asyncio.sleep(random.uniform(0.5, 1.0))
@@ -132,18 +193,9 @@ async def scrape_target(kullanici_adi, tip, proxy_url):
         return f"BLOK: {status}"
     
     kisiler = parse_page_users(html)
-    
-    soup = BeautifulSoup(html, "html.parser")
-    pagination_links = soup.select("div.paginate-pages li a")
-    max_page = 1
-    for a in pagination_links:
-        href = a.get("href", "")
-        match = re.search(r"/page/(\d+)/", href)
-        if match:
-            page_num = int(match.group(1))
-            if page_num > max_page:
-                max_page = page_num
+    max_page = extract_max_page(html)
 
+    # 2. ve sonraki sayfaları kesin olarak döngüye sokar
     if max_page > 1:
         sem = asyncio.Semaphore(3)
         tasks = [
@@ -167,7 +219,6 @@ async def main_async(kullanici_adi, proxy_url):
     )
     return res_following, res_followers
 
-# Cache süresini kapattık ki eski hatalı aramaları hafızadan basmasın
 def analiz_calistir(kullanici_adi):
     try:
         proxy_url = st.secrets["DATAIMPULSE_PROXY"]
@@ -192,11 +243,11 @@ if st.button("Analizi Başlat 🎬"):
             following, followers = analiz_calistir(cleaned_username)
 
         if following == "PROXY_ERROR" or followers == "PROXY_ERROR":
-            st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Hata: Proxy Secret Ayarı Yok)")
+            st.error("Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Hata: Proxy Secret Ayarı Yok)")
         elif isinstance(following, str) and following.startswith("BLOK"):
-            st.error(f"Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Following {following})")
+            st.error(f"Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Following {following})")
         elif isinstance(followers, str) and followers.startswith("BLOK"):
-            st.error(f"Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Followers {followers})")
+            st.error(f"Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz. (Detay: Followers {followers})")
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:

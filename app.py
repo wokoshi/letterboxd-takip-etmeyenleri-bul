@@ -109,17 +109,13 @@ def extract_max_page(html):
                 max_page = p
     return max_page
 
-async def fetch_page(url, proxy_url, max_retries=3, sem=None):
-    proxies = {"http": proxy_url, "https": proxy_url}
+async def fetch_page(url, proxy_url=None, max_retries=3, sem=None):
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
     
-    # Cloudflare'i atlatan gerçekçi tarayıcı başlıkları
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",
@@ -131,14 +127,14 @@ async def fetch_page(url, proxy_url, max_retries=3, sem=None):
         last_status = 0
         for attempt in range(max_retries):
             try:
-                await asyncio.sleep(random.uniform(0.5, 1.2))
+                await asyncio.sleep(random.uniform(0.3, 0.7))
                 async with AsyncSession() as s:
                     res = await s.get(
                         url, 
                         proxies=proxies, 
                         headers=headers, 
                         impersonate="chrome124", 
-                        timeout=18
+                        timeout=15
                     )
                     
                     if res.status_code == 404:
@@ -147,10 +143,10 @@ async def fetch_page(url, proxy_url, max_retries=3, sem=None):
                         return 200, res.text
                         
                     last_status = res.status_code
-                    await asyncio.sleep(1.0 + (attempt * 0.8))
+                    await asyncio.sleep(0.8 + (attempt * 0.5))
             except Exception as e:
                 last_status = f"ERR: {str(e)}"
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.5)
         return last_status, ""
 
     if sem:
@@ -186,22 +182,20 @@ async def scrape_target(kullanici_adi, tip, proxy_url, sem):
     return kisiler
 
 async def main_async(kullanici_adi, proxy_url):
-    sem = asyncio.Semaphore(1)  # Tekil akış, IP'yi yakalatmaz
+    sem = asyncio.Semaphore(1)
     
     res_following = await scrape_target(kullanici_adi, "following", proxy_url, sem)
     if isinstance(res_following, str) and res_following.startswith("BLOK"):
         return res_following, None
         
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.6)
     res_followers = await scrape_target(kullanici_adi, "followers", proxy_url, sem)
     
     return res_following, res_followers
 
 def analiz_calistir(kullanici_adi):
-    try:
-        proxy_url = st.secrets["DATAIMPULSE_PROXY"]
-    except Exception:
-        return "PROXY_ERROR", "PROXY_ERROR"
+    # Doğrudan Streamlit sunucusu üzerinden dener (Proxy kapalı)
+    proxy_url = None
     
     try:
         loop = asyncio.get_event_loop()
@@ -230,8 +224,10 @@ if st.button("Analizi Başlat 🎬"):
         else:
             if islem_modu == "Beni Takip Etmeyenler":
                 sonuc = {u: following[u] for u in following if u not in followers}
+                baslik = "Takip etmeyenler"
             else:
                 sonuc = {u: followers[u] for u in followers if u not in following}
+                baslik = "Senin takip etmediklerin"
 
             st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 

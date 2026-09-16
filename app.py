@@ -566,8 +566,7 @@ def fetch_page(
                 impersonate="chrome",
                 headers=headers,
                 timeout=25,
-                allow_redirects=True,
-                trust_env=False
+                allow_redirects=True
             )
 
             status = response.status_code

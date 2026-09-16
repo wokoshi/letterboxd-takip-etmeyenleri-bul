@@ -1,4 +1,3 @@
-```python
 import asyncio
 import random
 import re

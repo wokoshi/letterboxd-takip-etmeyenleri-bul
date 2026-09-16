@@ -72,25 +72,75 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
+# Letterboxd sistem URL'leri (kullanıcı değildir, elenmesi gerekir)
+SISTEM_URL_ENGEL = {
+    "films", "reviews", "lists", "activity", "members", "following", 
+    "followers", "likes", "watchlist", "diary", "tags", "stats", ""
+}
+
 def parse_page_users(html):
-    # lxml kurulu değilse html.parser fallback yapar
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
         
-    satirlar = soup.find_all("div", class_="person-summary")
     kisiler = {}
+    
+    # Letterboxd takipçi/takip tablosundaki satırlar
+    satirlar = soup.select(".person-summary, td.table-person")
+    
     for s in satirlar:
-        a = s.find("a", class_="avatar") or s.find("a", class_="name")
-        if a and a.get("href"):
-            raw_href = a["href"].strip("/")
-            username = raw_href.split("/")[-1].lower()
-            img = s.find("img")
-            img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
-            if username:
-                kisiler[username] = img_url
+        # İsim veya avatar linkini al
+        link = s.select_one("a.name, h3.title a, a.avatar")
+        if not link or not link.get("href"):
+            continue
+            
+        href_parts = [p for p in link["href"].strip("/").split("/") if p]
+        if not href_parts:
+            continue
+            
+        username = href_parts[-1].lower()
+        
+        # Fazladan eklenen sistem linklerini filtrele
+        if username in SISTEM_URL_ENGEL:
+            continue
+            
+        # Avatar görseli bul
+        img = s.select_one("img")
+        img_url = "https://s.ltrbxd.com/static/img/avatar220.png"
+        if img:
+            img_url = img.get("src") or img.get("data-src") or img_url
+            
+        kisiler[username] = img_url
+        
     return kisiler
+
+def extract_max_page(html):
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+        
+    max_page = 1
+    # Tüm sayfalama varyasyonlarını tara (paginate-pages, pagination, paginate-nextprev)
+    pagination_links = soup.select(".paginate-pages a, .pagination a, div.pagination li a")
+    
+    for a in pagination_links:
+        href = a.get("href", "")
+        match = re.search(r"/page/(\d+)/", href)
+        if match:
+            p = int(match.group(1))
+            if p > max_page:
+                max_page = p
+                
+        # Link metni doğrudan sayıysa
+        text = a.get_text(strip=True)
+        if text.isdigit():
+            p = int(text)
+            if p > max_page:
+                max_page = p
+                
+    return max_page
 
 async def fetch_page(session, url, kullanici_adi, max_retries=4, sem=None):
     headers = {
@@ -108,7 +158,7 @@ async def fetch_page(session, url, kullanici_adi, max_retries=4, sem=None):
                 if res.status_code == 404:
                     return 404, ""
                 if res.status_code == 200 and "Just a moment" not in res.text:
-                    if "person-summary" in res.text or "paginate-pages" in res.text or "No one yet" in res.text:
+                    if "person-summary" in res.text or "paginate-pages" in res.text or "table-person" in res.text or "No one yet" in res.text:
                         return 200, res.text
                 last_status = res.status_code
                 await asyncio.sleep(0.2 + (attempt * 0.2))
@@ -132,22 +182,9 @@ async def scrape_target(session, kullanici_adi, tip, sem):
         return f"BLOK: {status}"
     
     kisiler = parse_page_users(html)
-    
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
-        
-    pagination_links = soup.select("div.paginate-pages li a")
-    max_page = 1
-    for a in pagination_links:
-        href = a.get("href", "")
-        match = re.search(r"/page/(\d+)/", href)
-        if match:
-            page_num = int(match.group(1))
-            if page_num > max_page:
-                max_page = page_num
+    max_page = extract_max_page(html)
 
+    # 2. ve sonraki sayfaları çek
     if max_page > 1:
         tasks = [
             fetch_page(session, f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", kullanici_adi, sem=sem)
@@ -165,8 +202,7 @@ async def scrape_target(session, kullanici_adi, tip, sem):
 
 async def main_async(kullanici_adi, proxy_url):
     proxies = {"http": proxy_url, "https": proxy_url}
-    # Eşzamanlı bağlantıyı 6'ya çıkarıp tek session havuzunda tutuyoruz
-    sem = asyncio.Semaphore(6)
+    sem = asyncio.Semaphore(5)
     
     async with AsyncSession(proxies=proxies) as session:
         res_following, res_followers = await asyncio.gather(

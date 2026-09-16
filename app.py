@@ -72,27 +72,62 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-def parse_page_users(html):
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
+# Sistem sayfalarını ve menü bağlantılarını kesin olarak filtrele
+YASAKLI_LINKLER = {
+    "films", "reviews", "lists", "activity", "members", "following", 
+    "followers", "likes", "watchlist", "diary", "tags", "stats", "about", ""
+}
 
-    satirlar = soup.find_all("div", class_="person-summary")
+def parse_page_users(html):
+    soup = BeautifulSoup(html, "html.parser")
     kisiler = {}
+    
+    # Sadece ana gövdedeki gerçek kullanıcı satırlarını hedefle
+    ana_alan = soup.find("section", class_="content") or soup.find("div", id="content") or soup
+    satirlar = ana_alan.find_all(["div", "td"], class_=["person-summary", "table-person"])
+    
     for s in satirlar:
-        a = s.find("a", class_="avatar") or s.find("a", class_="name")
-        if a and a.get("href"):
-            raw_href = a["href"].strip("/")
-            username = raw_href.split("/")[-1].lower()
+        # İsmin veya profilin doğrudan bağlantısı
+        a = s.find("a", class_="name") or s.find("a", class_="avatar") or s.find("h3", class_="title")
+        if not a:
+            continue
+        
+        link = a.find("a") if a.name != "a" else a
+        if not link or not link.get("href"):
+            continue
+
+        raw_href = link["href"].strip("/")
+        parts = [p for p in raw_href.split("/") if p]
+        if not parts:
+            continue
             
-            img = s.find("img")
-            img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
-            if username:
-                kisiler[username] = img_url
+        username = parts[-1].lower()
+        if username in YASAKLI_LINKLER:
+            continue
+
+        img = s.find("img")
+        img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
+        
+        kisiler[username] = img_url
+        
     return kisiler
 
-async def fetch_page(url, proxy_url, kullanici_adi, max_retries=4, sem=None):
+def extract_max_page(html):
+    soup = BeautifulSoup(html, "html.parser")
+    max_page = 1
+    
+    # Bütün sayfalama elementlerini tara
+    sayfalama = soup.find_all("a", href=re.compile(r"/page/(\d+)/"))
+    for a in sayfalama:
+        match = re.search(r"/page/(\d+)/", a.get("href", ""))
+        if match:
+            p = int(match.group(1))
+            if p > max_page:
+                max_page = p
+                
+    return max_page
+
+async def fetch_page(url, proxy_url, kullanici_adi, max_retries=5, sem=None):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -106,17 +141,17 @@ async def fetch_page(url, proxy_url, kullanici_adi, max_retries=4, sem=None):
         for _ in range(max_retries):
             try:
                 async with AsyncSession() as s:
-                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=10)
+                    res = await s.get(url, proxies=proxies, impersonate="chrome120", headers=headers, timeout=15)
                     if res.status_code == 404:
                         return 404, ""
                     if res.status_code == 200 and "Cloudflare" not in res.text and "Just a moment" not in res.text:
-                        if "person-summary" in res.text or "paginate-pages" in res.text or "No one yet" in res.text:
+                        if "person-summary" in res.text or "table-person" in res.text or "paginate-pages" in res.text or "No one yet" in res.text:
                             return 200, res.text
                     last_status = res.status_code
-                    await asyncio.sleep(random.uniform(0.15, 0.35))
+                    await asyncio.sleep(random.uniform(0.4, 0.8))
             except Exception as e:
                 last_status = f"ERR: {str(e)}"
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.4)
         return last_status, ""
 
     if sem:
@@ -134,24 +169,11 @@ async def scrape_target(kullanici_adi, tip, proxy_url):
         return f"BLOK: {status}"
     
     kisiler = parse_page_users(html)
-    
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
+    max_page = extract_max_page(html)
 
-    pagination_links = soup.select("div.paginate-pages li a")
-    max_page = 1
-    for a in pagination_links:
-        href = a.get("href", "")
-        match = re.search(r"/page/(\d+)/", href)
-        if match:
-            page_num = int(match.group(1))
-            if page_num > max_page:
-                max_page = page_num
-
+    # 2. ve devamı sayfaları güvenli tempoyla çek
     if max_page > 1:
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(3)
         tasks = [
             fetch_page(f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{p}/", proxy_url, kullanici_adi, sem=sem)
             for p in range(2, max_page + 1)
@@ -188,11 +210,10 @@ def analiz_calistir(kullanici_adi):
     return loop.run_until_complete(main_async(kullanici_adi, proxy_url))
 
 if st.button("Analizi Başlat 🎬"):
-
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
-        with st.spinner("Tarama başlatılıyor... Takipçi ve takip edilen sayınızın yoğunluğuna bağlı olarak işlemin süresi değişiklik gösterebilir. Lütfen bekleyiniz."):
+        with st.spinner("Tarama başlatılıyor... Lütfen bekleyiniz."):
             cleaned_username = hedef_kullanici.strip().lower()
             following, followers = analiz_calistir(cleaned_username)
 
@@ -205,7 +226,6 @@ if st.button("Analizi Başlat 🎬"):
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
-
             if islem_modu == "Beni Takip Etmeyenler":
                 sonuc = {u: following[u] for u in following if u not in followers}
                 baslik = "Takip etmeyenler"
@@ -216,14 +236,11 @@ if st.button("Analizi Başlat 🎬"):
             st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 
             users = list(sonuc.items())
-
             for i in range(0, len(users), 2):
                 cols = st.columns(2)
-
                 for j in range(2):
                     if i + j < len(users):
                         usr, img = users[i+j]
-
                         with cols[j]:
                             st.markdown(f"""
                             <div class="card">

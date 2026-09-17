@@ -11,11 +11,7 @@ st.set_page_config(
 )
 
 # ----------------- PROXY AYARI (DATAIMPULSE) -----------------
-# Yerelde test etmek istersen aşağıdaki tırnak içine yazabilirsin.
-# Streamlit Cloud üzerinde Settings -> Secrets -> DATAIMPULSE_PROXY alanına eklenir.
-# Örnek: "http://kullanici:sifre@gw.dataimpulse.com:823"
 DEFAULT_PROXY = "" 
-
 PROXY_URL = st.secrets.get("DATAIMPULSE_PROXY", DEFAULT_PROXY)
 
 def get_session():
@@ -139,7 +135,7 @@ header {visibility: hidden;}
 """, unsafe_allow_html=True)
 
 st.markdown("<div class='title-text'>👥 Letterboxd Takipçi Analizcisi (Unfollow Checker)</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-text'>Dataimpulse residential proxy ve güvenli aralıklarla Cloudflare'e takılmadan seni geri takip etmeyenleri bulur.</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub-text'>Eksiksiz sayfalama kontrolüyle seni geri takip etmeyenleri net olarak listeler.</div>", unsafe_allow_html=True)
 
 col_input, col_btn = st.columns([4, 1])
 with col_input:
@@ -156,10 +152,13 @@ HEADERS = {
 def clean_username(href):
     if not href:
         return None
-    return href.strip('/').split('/')[-1].lower()
+    # /username/ -> username
+    parts = [p for p in href.strip("/").split("/") if p]
+    if parts:
+        return parts[-1].lower()
+    return None
 
 def safe_get(session, url):
-    # Ağ banı yememek için kontrollü deneme ve rastgele insan taklidi gecikmesi
     for deneme in range(4):
         try:
             res = session.get(url, impersonate="chrome120", headers=HEADERS, timeout=25)
@@ -169,47 +168,58 @@ def safe_get(session, url):
                 return None
         except Exception:
             pass
-        time.sleep(random.uniform(1.2, 2.0))
+        time.sleep(random.uniform(1.0, 1.8))
     return None
 
 def fetch_user_list(session, username, list_type, status_box):
     """list_type: 'following' veya 'followers'"""
     users = {}
     page = 1
-    type_tr = "Takip Edilenler" if list_type == "following" else "Takipçiler"
+    type_tr = "Takip Edilenler (Following)" if list_type == "following" else "Takipçiler (Followers)"
     
     while True:
-        status_box.info(f"{type_tr} taranıyor... (Sayfa {page})")
         url = f"https://letterboxd.com/{username}/{list_type}/" if page == 1 else f"https://letterboxd.com/{username}/{list_type}/page/{page}/"
-        
         html = safe_get(session, url)
         if not html:
             break
             
         soup = BeautifulSoup(html, "html.parser")
-        for s in soup.select("aside, .sidebar, #sidebar, div.sidebar"):
+        
+        # Kenar çubuğu, profil başlığı ve menüleri temizle (sahte kişi sayılmasın)
+        for s in soup.select("aside, .sidebar, #sidebar, div.profile-header, header, nav"):
             s.decompose()
             
+        # Sadece person-summary kartlarını veya tablo satırlarını hedefle
         cards = soup.select("div.person-summary, table.person-table tr")
         if not cards:
             break
             
+        found_in_page = 0
         for c in cards:
-            a = c.find("a", class_="name") or c.find("a")
+            # Kullanıcı adı linki
+            a = c.select_one("a.name, h3.title a, td.table-person a.name")
+            if not a:
+                # Fallback: avatar linki
+                a = c.select_one("a.avatar")
+                
             if a and a.get("href"):
                 uname = clean_username(a["href"])
-                if uname and uname not in ["followers", "following", "members"]:
+                if uname and uname not in ["followers", "following", "members", username.lower()]:
                     img = c.find("img")
                     avatar_url = img["src"] if img and img.get("src") else "https://s.ltrbxd.com/static/img/avatar220.png"
                     users[uname] = avatar_url
+                    found_in_page += 1
                     
-        has_next = soup.select("a.next, .paginate-next a, a[rel='next']")
-        if not has_next:
+        status_box.info(f"{type_tr}: Sayfa {page} tarandı. (Şu ana kadar {len(users)} kişi)")
+        
+        # Sayfalama kontrolü
+        # a.next veya .paginate-next a yoksa son sayfadayız
+        next_btn = soup.select_one("a.next, .paginate-next a, div.pagination a.next")
+        if not next_btn or found_in_page == 0:
             break
             
         page += 1
-        # Letterboxd hız sınırına takılmamak için yavaş, insansı bekleme
-        time.sleep(random.uniform(0.9, 1.6))
+        time.sleep(random.uniform(0.6, 1.1))
         
     return users
 
@@ -247,30 +257,27 @@ if baslat:
     following = fetch_user_list(session, cleaned_user, "following", status_box)
     progress_bar.progress(50)
     
-    # İki liste arasında nefes payı
-    time.sleep(1.0)
+    time.sleep(0.8)
     
     # 2. Takipçileri Çek
     followers = fetch_user_list(session, cleaned_user, "followers", status_box)
     progress_bar.progress(100)
     
     if not following and not followers:
-        status_box.error("Kullanıcı verileri çekilemedi. Profil adı doğru mu veya profil gizli mi kontrol et.")
+        status_box.error("Veriler çekilemedi. Profilin gizli olmadığından emin ol.")
         st.stop()
         
-    status_box.success(f"Tarama bitti! Takip Edilen: {len(following)} | Takipçi: {len(followers)}")
+    status_box.success(f"Tarama bitti! Toplam Takip Edilen: {len(following)} | Toplam Takipçi: {len(followers)}")
     time.sleep(0.4)
     
     following_set = set(following.keys())
     followers_set = set(followers.keys())
-    
-    # Kümeleri birleştir (avarları kaybetmemek için)
     all_users = {**following, **followers}
     
     # Seni geri takip etmeyenler
     not_following_back = following_set - followers_set
     
-    # Senin takip etmediğin hayranlar
+    # Senin takip etmediğin takipçiler
     fans = followers_set - following_set
 
     st.write("---")
@@ -284,7 +291,7 @@ if baslat:
     """, unsafe_allow_html=True)
     render_grid(not_following_back, all_users, is_fan=False)
 
-    # 2. Senin Geri Takip Etmediğin Takipçilerin
+    # 2. Hayranlar
     st.markdown(f"""
     <div class="section-badge section-badge-fan">
         <span>⭐ Senin Takip Etmediğin Takipçilerin (Hayranlar)</span>

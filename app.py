@@ -1,10 +1,19 @@
 import streamlit as st
 from bs4 import BeautifulSoup
-import requests
-import urllib.parse
-import time
+import asyncio
+import os
 
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
+
+# Playwright tarayıcı çekirdeğini Streamlit konteynerine kur
+@st.cache_resource
+def setup_browser_engine():
+    os.system("playwright install chromium")
+
+setup_browser_engine()
+
+from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 st.markdown("""
 <style>
@@ -71,55 +80,72 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def veri_cek(kullanici_adi, tip):
+def parse_cards(html):
+    soup = BeautifulSoup(html, 'html.parser')
     kisiler = {}
-    
-    if "ZENROWS_API_KEY" not in st.secrets:
-        return "KEY_YOK"
-        
-    api_key = st.secrets["ZENROWS_API_KEY"]
-    sayfa = 1
+    satirlar = soup.find_all('div', class_='person-summary')
+    for s in satirlar:
+        a = s.find('a', class_='name')
+        if a and a.get('href'):
+            username = a['href'].strip('/')
+            img = s.find('img')
+            img_url = img['src'] if img and img.get('src') else "https://s.ltrbxd.com/static/img/avatar220.png"
+            kisiler[username] = img_url
+    return kisiler
+
+async def fetch_relation_list(browser, username, relation_type):
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        viewport={"width": 1280, "height": 800}
+    )
+    page = await context.new_page()
+    await stealth_async(page)
+
+    page_num = 1
+    users_dict = {}
 
     while True:
-        target_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/" if sayfa == 1 else f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{sayfa}/"
-        
-        # ZenRows API üzerinden Cloudflare bypass isteği
-        params = {
-            "apikey": api_key,
-            "url": target_url,
-            "js_render": "true",
-            "premium_proxy": "true"
-        }
-
+        url = f"https://letterboxd.com/{username}/{relation_type}/page/{page_num}/" if page_num > 1 else f"https://letterboxd.com/{username}/{relation_type}/"
         try:
-            res = requests.get("https://api.zenrows.com/v1/", params=params, timeout=30)
+            res = await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            if res and res.status == 404:
+                if page_num == 1:
+                    await context.close()
+                    return None
+                break
+
+            await page.wait_for_timeout(1000)
+            content = await page.content()
             
-            if res.status_code == 404:
-                return None if sayfa == 1 else kisiler
-                
-            if res.status_code != 200:
-                return f"BLOK [{res.status_code}]"
+            parsed = parse_cards(content)
+            if not parsed:
+                break
 
-            soup = BeautifulSoup(res.text, 'html.parser')
-            satirlar = soup.find_all('div', class_='person-summary')
+            users_dict.update(parsed)
 
-            if not satirlar:
-                return kisiler
+            soup = BeautifulSoup(content, 'html.parser')
+            has_next = soup.select("a.next, .paginate-next a, a[rel='next']")
+            if not has_next:
+                break
 
-            for s in satirlar:
-                a = s.find('a', class_='name')
-                if a:
-                    username = a['href'].strip('/')
-                    img = s.find('img')
-                    img_url = img['src'] if img else "https://s.ltrbxd.com/static/img/avatar220.png"
-                    kisiler[username] = img_url
+            page_num += 1
+        except Exception:
+            break
 
-            sayfa += 1
-            time.sleep(0.5)
+    await context.close()
+    return users_dict
 
-        except Exception as e:
-            return f"BLOK [{str(e)}]"
+async def execute_scraping(username):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
+        following = await fetch_relation_list(browser, username, "following")
+        await asyncio.sleep(0.5)
+        followers = await fetch_relation_list(browser, username, "followers")
+        await browser.close()
+        return following, followers
 
 if st.button("Analizi Başlat 🎬"):
     if not hedef_kullanici:
@@ -127,15 +153,11 @@ if st.button("Analizi Başlat 🎬"):
     else:
         with st.spinner("Tarama başlatılıyor... Lütfen bekleyiniz."):
             cleaned = hedef_kullanici.strip().lower()
-            following = veri_cek(cleaned, "following")
-            followers = veri_cek(cleaned, "followers")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            following, followers = loop.run_until_complete(execute_scraping(cleaned))
 
-        if following == "KEY_YOK" or followers == "KEY_YOK":
-            st.error("Secrets altında ZENROWS_API_KEY tanımlanmamış!")
-        elif (isinstance(following, str) and following.startswith("BLOK")) or \
-             (isinstance(followers, str) and followers.startswith("BLOK")):
-            st.error(f"Bağlantı Hatası: Following -> {following} | Followers -> {followers}")
-        elif following is None or followers is None:
+        if following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
             if islem_modu == "Beni Takip Etmeyenler":

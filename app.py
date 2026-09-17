@@ -5,7 +5,7 @@ import os
 
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
-# Playwright tarayıcı çekirdeğini Streamlit konteynerine kur
+# Playwright Chromium motorunu kur
 @st.cache_resource
 def setup_browser_engine():
     os.system("playwright install chromium")
@@ -13,7 +13,6 @@ def setup_browser_engine():
 setup_browser_engine()
 
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
 
 st.markdown("""
 <style>
@@ -96,11 +95,18 @@ def parse_cards(html):
 async def fetch_relation_list(browser, username, relation_type):
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 800}
+        viewport={"width": 1280, "height": 800},
+        locale="en-US"
     )
-    page = await context.new_page()
-    await stealth_async(page)
+    
+    # Tarayıcıyı bot gibi gösteren navigator.webdriver bayrağını gizle
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+    """)
 
+    page = await context.new_page()
     page_num = 1
     users_dict = {}
 
@@ -139,7 +145,12 @@ async def execute_scraping(username):
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled"
+            ]
         )
         following = await fetch_relation_list(browser, username, "following")
         await asyncio.sleep(0.5)

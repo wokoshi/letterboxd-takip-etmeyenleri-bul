@@ -1,11 +1,11 @@
 import streamlit as st
 from bs4 import BeautifulSoup
 import asyncio
+import math
 import os
 
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
-# Playwright Chromium motorunu kur
 @st.cache_resource
 def setup_browser_engine():
     os.system("playwright install chromium")
@@ -19,9 +19,7 @@ st.markdown("""
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 header {visibility: hidden;}
-
 .stApp { background-color: #0A110C; color: #9CAF9F; }
-
 .custom-title {
     color: #E8F0E9;
     font-size: 1.8rem;
@@ -33,7 +31,6 @@ header {visibility: hidden;}
     color: #7A8C7D;
     margin-bottom: 1.8rem;
 }
-
 .footer-sig {
     text-align: center;
     color: #5A6E5E;
@@ -46,16 +43,13 @@ header {visibility: hidden;}
     margin-left: auto;
     margin-right: auto;
 }
-
 .stButton>button {
     background-color: #1B5E32;
     color: white;
     border-radius: 12px;
     width: 100%;
 }
-
 img { border-radius: 10px; }
-
 .card {
     background-color:#121E15;
     padding:10px;
@@ -79,67 +73,101 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-def parse_cards(html):
+def extract_users(html):
     soup = BeautifulSoup(html, 'html.parser')
-    kisiler = {}
-    satirlar = soup.find_all('div', class_='person-summary')
-    for s in satirlar:
-        a = s.find('a', class_='name')
+    users = {}
+    
+    # Sadece ana gövdedeki tabloyu ve person kartlarını hedefle
+    main_section = soup.select_one("div#content, section#content, div.site-body")
+    target_soup = main_section if main_section else soup
+    
+    # Kenar çubuğunu temizle
+    for s in target_soup.select("aside, .sidebar, #sidebar, div.sidebar"):
+        s.decompose()
+
+    cards = target_soup.select("table.person-table tr, div.person-summary")
+    for card in cards:
+        a = card.find('a', class_='name')
         if a and a.get('href'):
-            username = a['href'].strip('/')
-            img = s.find('img')
-            img_url = img['src'] if img and img.get('src') else "https://s.ltrbxd.com/static/img/avatar220.png"
-            kisiler[username] = img_url
-    return kisiler
+            parts = a['href'].strip('/').split('/')
+            if parts:
+                uname = parts[-1].lower()
+                img = card.find('img')
+                img_url = img['src'] if img and img.get('src') else "https://s.ltrbxd.com/static/img/avatar220.png"
+                users[uname] = img_url
+
+    return users
+
+async def wait_for_letterboxd_page(page, url):
+    # Cloudflare challenge kontrolü ve bekleme mekanizması
+    for attempt in range(3):
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(1500)
+        
+        title = await page.title()
+        content = await page.content()
+        
+        # Eğer Cloudflare ekranı gelirse çözülmesi için bekle
+        if "Just a moment" in title or "Cloudflare" in content:
+            await page.wait_for_timeout(3500)
+            title = await page.title()
+            
+        if "Just a moment" not in title:
+            return content
+            
+        await page.wait_for_timeout(2000)
+    
+    return await page.content()
 
 async def fetch_relation_list(browser, username, relation_type):
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 800},
+        viewport={"width": 1366, "height": 768},
         locale="en-US"
     )
-    
-    # Tarayıcıyı bot gibi gösteren navigator.webdriver bayrağını gizle
     await context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        window.navigator.chrome = { runtime: {} };
     """)
-
     page = await context.new_page()
+
+    all_users = {}
     page_num = 1
-    users_dict = {}
 
     while True:
         url = f"https://letterboxd.com/{username}/{relation_type}/page/{page_num}/" if page_num > 1 else f"https://letterboxd.com/{username}/{relation_type}/"
+        
         try:
-            res = await page.goto(url, wait_until="domcontentloaded", timeout=25000)
-            if res and res.status == 404:
-                if page_num == 1:
-                    await context.close()
-                    return None
-                break
-
-            await page.wait_for_timeout(1000)
-            content = await page.content()
+            content = await wait_for_letterboxd_page(page, url)
             
-            parsed = parse_cards(content)
-            if not parsed:
+            # Sayfa 404 mü veya hesap yok mu?
+            if "Page not found" in content and page_num == 1:
+                await context.close()
+                return None
+
+            page_users = extract_users(content)
+            
+            # Eğer hiç kullanıcı gelmediyse ve hala Cloudflare'deyse dur
+            if not page_users:
                 break
 
-            users_dict.update(parsed)
+            all_users.update(page_users)
 
+            # Sayfalamada 'Next' butonu var mı kontrolü
             soup = BeautifulSoup(content, 'html.parser')
             has_next = soup.select("a.next, .paginate-next a, a[rel='next']")
+            
             if not has_next:
                 break
 
             page_num += 1
-        except Exception:
+            await page.wait_for_timeout(1200) # Cloudflare ratelimit yememek için bekleme
+
+        except Exception as e:
             break
 
     await context.close()
-    return users_dict
+    return all_users
 
 async def execute_scraping(username):
     async with async_playwright() as p:
@@ -153,7 +181,7 @@ async def execute_scraping(username):
             ]
         )
         following = await fetch_relation_list(browser, username, "following")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
         followers = await fetch_relation_list(browser, username, "followers")
         await browser.close()
         return following, followers
@@ -162,7 +190,7 @@ if st.button("Analizi Başlat 🎬"):
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
-        with st.spinner("Tarama başlatılıyor... Lütfen bekleyiniz."):
+        with st.spinner("Tarama başlatılıyor... Cloudflare doğrulamaları aşılıyor, lütfen bekleyiniz."):
             cleaned = hedef_kullanici.strip().lower()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)

@@ -3,8 +3,10 @@ from bs4 import BeautifulSoup
 import requests
 import time
 
+# ayar
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
+# css
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
@@ -62,6 +64,7 @@ img { border-radius: 10px; }
 st.markdown("<div class='custom-title'>🔍 Letterboxd Takip Analizi</div>", unsafe_allow_html=True)
 st.markdown("<div class='custom-subtitle'>Hesabınızın takipçi ve takip edilen durumunu tek tuşla öğrenin.</div>", unsafe_allow_html=True)
 
+# mod
 islem_modu = st.radio(
     "",
     ["Beni Takip Etmeyenler", "Benim Takip Etmediklerim"],
@@ -74,19 +77,21 @@ def fetch_via_solver(target_url, solver_url):
     payload = {
         "cmd": "request.get",
         "url": target_url,
-        "maxTimeout": 45000
+        "maxTimeout": 60000
     }
     headers = {"Content-Type": "application/json"}
     
     try:
-        res = requests.post(solver_url, json=payload, headers=headers, timeout=50)
+        res = requests.post(solver_url, json=payload, headers=headers, timeout=70)
         data = res.json()
         if data.get("status") == "ok":
             solution = data.get("solution", {})
             return solution.get("status", 200), solution.get("response", "")
-        return 500, ""
-    except Exception:
-        return 500, ""
+        return 500, f"FlareSolverr Hatası: {data.get('message', 'Bilinmeyen hata')}"
+    except requests.exceptions.Timeout:
+        return 500, "Render zaman aşımına uğradı (servis uyanıyor olabilir, lütfen 20-30 sn sonra tekrar deneyin)"
+    except Exception as e:
+        return 500, f"Bağlantı Hatası: {str(e)}"
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def veri_cek(kullanici_adi, tip):
@@ -107,7 +112,7 @@ def veri_cek(kullanici_adi, tip):
             return None if sayfa == 1 else kisiler
             
         if status_code != 200 or not html_content:
-            return f"BLOK [{status_code}]"
+            return f"BLOK [{html_content if isinstance(html_content, str) and html_content else status_code}]"
 
         soup = BeautifulSoup(html_content, 'html.parser')
         
@@ -137,11 +142,12 @@ def veri_cek(kullanici_adi, tip):
 
     return kisiler
 
+# analiz
 if st.button("Analizi Başlat 🎬"):
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
-        with st.spinner("Tarama başlatılıyor... Cloudflare engelleri çözülüyor, lütfen bekleyiniz."):
+        with st.spinner("Tarama başlatılıyor... Cloudflare doğrulamaları aşılıyor, lütfen bekleyiniz."):
             cleaned = hedef_kullanici.strip().lower()
             following = veri_cek(cleaned, "following")
             followers = veri_cek(cleaned, "followers")
@@ -150,7 +156,7 @@ if st.button("Analizi Başlat 🎬"):
             st.error("Secrets altında FLARESOLVERR_URL tanımlanmamış!")
         elif (isinstance(following, str) and following.startswith("BLOK")) or \
              (isinstance(followers, str) and followers.startswith("BLOK")):
-            st.error(f"Hata Oluştu: Following -> {following} | Followers -> {followers}")
+            st.error(f"Hata Detayı: Following -> {following} | Followers -> {followers}")
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
@@ -161,6 +167,7 @@ if st.button("Analizi Başlat 🎬"):
 
             st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 
+            # grid kısmı
             users = list(sonuc.items())
             for i in range(0, len(users), 2):
                 cols = st.columns(2)
@@ -178,4 +185,5 @@ if st.button("Analizi Başlat 🎬"):
                             </div>
                             """, unsafe_allow_html=True)
 
+# --- FOOTER ---
 st.markdown("<div class='footer-sig'>Created by <a href='https://letterboxd.com/wokoshi/' target='_blank'>wokoshi</a></div>", unsafe_allow_html=True)

@@ -1,116 +1,184 @@
 import streamlit as st
 from bs4 import BeautifulSoup
-from curl_cffi import requests
-import math
-import random
+from curl_cffi import requests as cureq
 import time
+import random
 
+# ayar
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
-st.title("🔍 Letterboxd Takip Analizi")
+# css
+st.markdown("""
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
 
-islem_modu = st.radio("", ["Beni Takip Etmeyenler", "Benim Takip Etmediklerim"], horizontal=True)
-hedef_kullanici = st.text_input("Letterboxd Kullanıcı Adı:")
+.stApp { background-color: #0A110C; color: #9CAF9F; }
 
-def get_session(proxy_url):
-    s = requests.Session()
-    s.proxies = {"http": proxy_url, "https": proxy_url}
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://letterboxd.com/",
-    })
-    return s
+.custom-title {
+    color: #E8F0E9;
+    font-size: 1.8rem;
+    font-weight: 800;
+    text-align: center;
+}
+.custom-subtitle {
+    text-align: center;
+    color: #7A8C7D;
+    margin-bottom: 1.8rem;
+}
 
-def parse_users(html):
-    soup = BeautifulSoup(html, "html.parser")
-    # Kenar çubuğunu yok et
-    for sb in soup.select("aside, .sidebar, #sidebar, div.sidebar"):
-        sb.decompose()
+.footer-sig {
+    text-align: center;
+    color: #5A6E5E;
+    font-size: 14px;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid #1A2E20;
+    width: 60%;
+    opacity: 0.9;
+    margin-left: auto;
+    margin-right: auto;
+}
 
-    users = {}
-    # Sadece ana gövdedeki person-summary kartları
-    cards = soup.select("div.person-summary")
-    for card in cards:
-        name_tag = card.find("a", class_="name")
-        if name_tag and name_tag.get("href"):
-            uname = name_tag.get("href").strip("/").split("/")[-1].lower()
-            img = card.find("img")
-            img_url = img["src"] if (img and img.get("src")) else "https://s.ltrbxd.com/static/img/avatar220.png"
-            users[uname] = img_url
-    return users
+.stButton>button {
+    background-color: #1B5E32;
+    color: white;
+    border-radius: 12px;
+    width: 100%;
+}
 
-def get_all_users_for_rel(session, username, rel_type):
-    users = {}
-    page = 1
+img { border-radius: 10px; }
+
+.card {
+    background-color:#121E15;
+    padding:10px;
+    border-radius:14px;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin-bottom:10px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("<div class='custom-title'>🔍 Letterboxd Takip Analizi</div>", unsafe_allow_html=True)
+st.markdown("<div class='custom-subtitle'>Hesabınızın takipçi ve takip edilen durumunu tek tuşla öğrenin.</div>", unsafe_allow_html=True)
+
+# mod
+islem_modu = st.radio(
+    "",
+    ["Beni Takip Etmeyenler", "Benim Takip Etmediklerim"],
+    horizontal=True
+)
+
+hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
+
+# veri
+@st.cache_data(ttl=1800, show_spinner=False)
+def veri_cek(kullanici_adi, tip):
+    kisiler = {}
     
+    try:
+        PROXY_URL = st.secrets["DATAIMPULSE_PROXY"]
+    except:
+        return "PROXY_ERROR"
+        
+    proxies = {"http": PROXY_URL, "https": PROXY_URL}
+    session = cureq.Session()
+
+    sayfa = 1
+
     while True:
-        url = f"https://letterboxd.com/{username}/{rel_type}/page/{page}/" if page > 1 else f"https://letterboxd.com/{username}/{rel_type}/"
-        
-        res = None
-        for _ in range(3):
+        url = f"https://letterboxd.com/{kullanici_adi}/{tip}/" if sayfa == 1 else f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{sayfa}/"
+        sayfa_basarili = False
+
+        for deneme in range(10):
+
+            if deneme > 0:
+                time.sleep(random.uniform(0.6, 1.4))
+
             try:
-                res = session.get(url, impersonate="chrome124", timeout=15)
-                if res.status_code in [200, 404]:
-                    break
-                time.sleep(1)
-            except Exception:
-                time.sleep(1)
+                res = session.get(url, proxies=proxies, impersonate="chrome120", timeout=20)
 
-        if not res or res.status_code == 404:
-            if page == 1:
-                return None  # Kullanıcı yok
-            break
-            
-        if res.status_code != 200:
-            return f"BLOK: {res.status_code}"
+                if res.status_code == 404:
+                    return None if sayfa == 1 else kisiler
 
-        parsed = parse_users(res.text)
-        if not parsed:
-            break
-            
-        users.update(parsed)
-        
-        # Sayfada 'Next' butonu var mı kontrolü
-        soup = BeautifulSoup(res.text, "html.parser")
-        has_next = soup.select("a.next, .paginate-next a, a[rel='next']")
-        if not has_next:
-            break
-            
-        page += 1
-        time.sleep(random.uniform(0.4, 0.7))
-        
-    return users
+                if res.status_code != 200 or "Cloudflare" in res.text or "Just a moment" in res.text:
+                    session = cureq.Session()
+                    continue
 
+                soup = BeautifulSoup(res.text, 'html.parser')
+
+                satirlar = soup.find_all('div', class_='person-summary')
+
+                if not satirlar:
+                    return kisiler
+
+                for s in satirlar:
+                    a = s.find('a', class_='name')
+                    if a:
+                        username = a['href'].strip('/')
+                        img = s.find('img')
+                        img_url = img['src'] if img else "https://s.ltrbxd.com/static/img/avatar220.png"
+                        kisiler[username] = img_url
+
+                sayfa += 1
+                sayfa_basarili = True
+                break
+
+            except:
+                session = cureq.Session()
+
+        if not sayfa_basarili:
+            return "BLOK"
+
+# analiz
 if st.button("Analizi Başlat 🎬"):
+
     if not hedef_kullanici:
-        st.warning("Kullanıcı adınızı giriniz.")
+        st.warning("Kullanıcı adınızı giriniz")
     else:
-        proxy_url = st.secrets.get("DATAIMPULSE_PROXY")
-        if not proxy_url:
-            st.error("Secrets altında DATAIMPULSE_PROXY tanımlı değil.")
+        with st.spinner("Tarama başlatılıyor... Takipçi ve takip edilen sayınızın yoğunluğuna bağlı olarak işlemin süresi değişiklik gösterebilir. Lütfen bekleyiniz."):
+
+            following = veri_cek(hedef_kullanici, "following")
+            followers = veri_cek(hedef_kullanici, "followers")
+
+        if following in ["BLOK","PROXY_ERROR"] or followers in ["BLOK","PROXY_ERROR"]:
+            st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz.")
+        elif following is None or followers is None:
+            st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
-            with st.spinner("Analiz ediliyor..."):
-                cleaned = hedef_kullanici.strip().lower()
-                session = get_session(proxy_url)
-                
-                following = get_all_users_for_rel(session, cleaned, "following")
-                time.sleep(0.5)
-                followers = get_all_users_for_rel(session, cleaned, "followers")
 
-            if isinstance(following, str) and following.startswith("BLOK"):
-                st.error(f"Following listesi çekilemedi: {following}")
-            elif isinstance(followers, str) and followers.startswith("BLOK"):
-                st.error(f"Followers listesi çekilemedi: {followers}")
-            elif following is None or followers is None:
-                st.error("Kullanıcı bulunamadı.")
+            if islem_modu == "Beni Takip Etmeyenler":
+                sonuc = {u: following[u] for u in following if u not in followers}
+                baslik = "Takip etmeyenler"
             else:
-                # İki listenin de başarıyla dolduğunu doğrula
-                if islem_modu == "Beni Takip Etmeyenler":
-                    sonuc = {u: following[u] for u in following if u not in followers}
-                else:
-                    sonuc = {u: followers[u] for u in followers if u not in following}
+                sonuc = {u: followers[u] for u in followers if u not in following}
+                baslik = "Senin takip etmediklerin"
 
-                st.success(f"İşlem tamamlandı! Toplam {len(sonuc)} kişi bulundu.")
-                for u, img in sonuc.items():
-                    st.markdown(f"- [{u}](https://letterboxd.com/{u}/)")
+            st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
+
+            # grid kismi
+            users = list(sonuc.items())
+
+            for i in range(0, len(users), 2):
+                cols = st.columns(2)
+
+                for j in range(2):
+                    if i + j < len(users):
+                        usr, img = users[i+j]
+
+                        with cols[j]:
+                            st.markdown(f"""
+                            <div class="card">
+                                <img src="{img}" width="50">
+                                <div>
+                                    <b>{usr}</b><br>
+                                    <a href="https://letterboxd.com/{usr}/" target="_blank">Profile git</a>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+# --- FOOTER ---
+st.markdown("<div class='footer-sig'>Created by <a href='https://letterboxd.com/wokoshi/' target='_blank'>wokoshi</a></div>", unsafe_allow_html=True)

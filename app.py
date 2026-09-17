@@ -4,10 +4,8 @@ from curl_cffi import requests as cureq
 import time
 import random
 
-# ayar
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
-# css
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
@@ -65,7 +63,6 @@ img { border-radius: 10px; }
 st.markdown("<div class='custom-title'>🔍 Letterboxd Takip Analizi</div>", unsafe_allow_html=True)
 st.markdown("<div class='custom-subtitle'>Hesabınızın takipçi ve takip edilen durumunu tek tuşla öğrenin.</div>", unsafe_allow_html=True)
 
-# mod
 islem_modu = st.radio(
     "",
     ["Beni Takip Etmeyenler", "Benim Takip Etmediklerim"],
@@ -74,18 +71,22 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-# veri
+def get_proxy_list():
+    try:
+        raw_proxies = st.secrets["WEBSHARE_PROXIES"]
+        if "," in raw_proxies:
+            return [p.strip() for p in raw_proxies.split(",") if p.strip()]
+        return [p.strip() for p in raw_proxies.splitlines() if p.strip()]
+    except Exception:
+        return []
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def veri_cek(kullanici_adi, tip):
     kisiler = {}
+    proxy_havuzu = get_proxy_list()
     
-    try:
-        PROXY_URL = st.secrets["DATAIMPULSE_PROXY"]
-    except:
+    if not proxy_havuzu:
         return "PROXY_ERROR"
-        
-    proxies = {"http": PROXY_URL, "https": PROXY_URL}
-    session = cureq.Session()
 
     sayfa = 1
 
@@ -94,6 +95,9 @@ def veri_cek(kullanici_adi, tip):
         sayfa_basarili = False
 
         for deneme in range(10):
+            secilen_proxy = random.choice(proxy_havuzu)
+            proxies = {"http": secilen_proxy, "https": secilen_proxy}
+            session = cureq.Session()
 
             if deneme > 0:
                 time.sleep(random.uniform(0.6, 1.4))
@@ -105,7 +109,6 @@ def veri_cek(kullanici_adi, tip):
                     return None if sayfa == 1 else kisiler
 
                 if res.status_code != 200 or "Cloudflare" in res.text or "Just a moment" in res.text:
-                    session = cureq.Session()
                     continue
 
                 soup = BeautifulSoup(res.text, 'html.parser')
@@ -128,12 +131,11 @@ def veri_cek(kullanici_adi, tip):
                 break
 
             except:
-                session = cureq.Session()
+                continue
 
         if not sayfa_basarili:
             return "BLOK"
 
-# analiz
 if st.button("Analizi Başlat 🎬"):
 
     if not hedef_kullanici:
@@ -141,25 +143,22 @@ if st.button("Analizi Başlat 🎬"):
     else:
         with st.spinner("Tarama başlatılıyor... Takipçi ve takip edilen sayınızın yoğunluğuna bağlı olarak işlemin süresi değişiklik gösterebilir. Lütfen bekleyiniz."):
 
-            following = veri_cek(hedef_kullanici, "following")
-            followers = veri_cek(hedef_kullanici, "followers")
+            following = veri_cek(hedef_kullanici.strip().lower(), "following")
+            followers = veri_cek(hedef_kullanici.strip().lower(), "followers")
 
-        if following in ["BLOK","PROXY_ERROR"] or followers in ["BLOK","PROXY_ERROR"]:
-            st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz.")
+        if following in ["BLOK", "PROXY_ERROR"] or followers in ["BLOK", "PROXY_ERROR"]:
+            st.error("Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz.")
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
 
             if islem_modu == "Beni Takip Etmeyenler":
                 sonuc = {u: following[u] for u in following if u not in followers}
-                baslik = "Takip etmeyenler"
             else:
                 sonuc = {u: followers[u] for u in followers if u not in following}
-                baslik = "Senin takip etmediklerin"
 
             st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 
-            # grid kismi
             users = list(sonuc.items())
 
             for i in range(0, len(users), 2):
@@ -180,5 +179,4 @@ if st.button("Analizi Başlat 🎬"):
                             </div>
                             """, unsafe_allow_html=True)
 
-# --- FOOTER ---
 st.markdown("<div class='footer-sig'>Created by <a href='https://letterboxd.com/wokoshi/' target='_blank'>wokoshi</a></div>", unsafe_allow_html=True)

@@ -135,7 +135,7 @@ header {visibility: hidden;}
 """, unsafe_allow_html=True)
 
 st.markdown("<div class='title-text'>👥 Letterboxd Takipçi Analizcisi (Unfollow Checker)</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-text'>Eksiksiz sayfalama kontrolüyle seni geri takip etmeyenleri net olarak listeler.</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub-text'>Cloudflare bypass ve yavaş, güvenli insansı tarama ile tüm sayfaları eksiksiz analiz eder.</div>", unsafe_allow_html=True)
 
 col_input, col_btn = st.columns([4, 1])
 with col_input:
@@ -146,29 +146,43 @@ with col_btn:
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Referer": "https://letterboxd.com/",
-    "X-Requested-With": "XMLHttpRequest"
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 }
 
 def clean_username(href):
     if not href:
         return None
-    # /username/ -> username
     parts = [p for p in href.strip("/").split("/") if p]
     if parts:
         return parts[-1].lower()
     return None
 
-def safe_get(session, url):
-    for deneme in range(4):
+def safe_get(session, url, status_box=None):
+    # Cloudflare veya Rate limit için 5 denemeli esnek bekleme
+    for deneme in range(1, 6):
         try:
-            res = session.get(url, impersonate="chrome120", headers=HEADERS, timeout=25)
+            res = session.get(url, impersonate="chrome120", headers=HEADERS, timeout=30)
             if res.status_code == 200:
+                # Sayfa içeriğinde cloudflare challenge var mı kontrolü
+                if "Just a moment..." in res.text or "cf-browser-verification" in res.text:
+                    if status_box:
+                        status_box.warning(f"Cloudflare kontrolü algılandı! Bekleniyor... (Deneme {deneme}/5)")
+                    time.sleep(random.uniform(5.0, 7.5))
+                    continue
                 return res.text
+            elif res.status_code in [403, 429]:
+                bekleme = deneme * 4.0
+                if status_box:
+                    status_box.warning(f"Hız sınırına takıldı ({res.status_code}). {bekleme:.1f} sn dinleniliyor...")
+                time.sleep(bekleme)
             elif res.status_code == 404:
                 return None
-        except Exception:
-            pass
-        time.sleep(random.uniform(1.0, 1.8))
+        except Exception as e:
+            if status_box:
+                status_box.warning(f"Bağlantı gecikmesi, tekrar deneniyor... ({deneme}/5)")
+            time.sleep(random.uniform(3.0, 5.0))
+            
     return None
 
 def fetch_user_list(session, username, list_type, status_box):
@@ -179,53 +193,60 @@ def fetch_user_list(session, username, list_type, status_box):
     
     while True:
         url = f"https://letterboxd.com/{username}/{list_type}/" if page == 1 else f"https://letterboxd.com/{username}/{list_type}/page/{page}/"
-        html = safe_get(session, url)
+        status_box.info(f"⏳ **{type_tr}** taranıyor: **Sayfa {page}** (Şu ana kadar toplanan: {len(users)} kişi)")
+        
+        html = safe_get(session, url, status_box)
         if not html:
             break
             
         soup = BeautifulSoup(html, "html.parser")
         
-        # Kenar çubuğu, profil başlığı ve menüleri temizle (sahte kişi sayılmasın)
-        for s in soup.select("aside, .sidebar, #sidebar, div.profile-header, header, nav"):
+        # Yan panelleri ve menüleri temizle
+        for s in soup.select("aside, .sidebar, #sidebar, div.profile-header, header, nav, div.site-header"):
             s.decompose()
             
-        # Sadece person-summary kartlarını veya tablo satırlarını hedefle
-        cards = soup.select("div.person-summary, table.person-table tr")
+        cards = soup.select("div.person-summary, table.person-table tr, td.table-person")
         if not cards:
             break
             
         found_in_page = 0
         for c in cards:
-            # Kullanıcı adı linki
-            a = c.select_one("a.name, h3.title a, td.table-person a.name")
-            if not a:
-                # Fallback: avatar linki
-                a = c.select_one("a.avatar")
+            a = c.select_one("a.name, h3.title a, a.avatar")
+            if not a and c.name == "a":
+                a = c
                 
             if a and a.get("href"):
                 uname = clean_username(a["href"])
                 if uname and uname not in ["followers", "following", "members", username.lower()]:
-                    img = c.find("img")
-                    avatar_url = img["src"] if img and img.get("src") else "https://s.ltrbxd.com/static/img/avatar220.png"
-                    users[uname] = avatar_url
-                    found_in_page += 1
-                    
-        status_box.info(f"{type_tr}: Sayfa {page} tarandı. (Şu ana kadar {len(users)} kişi)")
+                    if uname not in users:
+                        img = c.find("img")
+                        avatar_url = img["src"] if img and img.get("src") else "https://s.ltrbxd.com/static/img/avatar220.png"
+                        users[uname] = avatar_url
+                        found_in_page += 1
+                        
+        # Sayfada hiç kullanıcı bulamadıysa bitir
+        if found_in_page == 0:
+            break
+            
+        # Sonraki sayfa var mı kontrolü (Birden fazla seçici ile sağlama al)
+        next_link = soup.select_one("a.next, .paginate-next a, li.paginate-next a, a[rel='next']")
         
-        # Sayfalama kontrolü
-        # a.next veya .paginate-next a yoksa son sayfadayız
-        next_btn = soup.select_one("a.next, .paginate-next a, div.pagination a.next")
-        if not next_btn or found_in_page == 0:
+        # Eğer buton bulunamadıysa ama bu sayfada tam 25 kişi varsa sonraki sayfayı yine de bir kez dene
+        if not next_link and found_in_page < 20:
             break
             
         page += 1
-        time.sleep(random.uniform(0.6, 1.1))
+        
+        # Sayfalar arası Cloudflare'e yakalanmamak için insan gibi bekle (2.5 - 4.2 sn)
+        sleep_sec = random.uniform(2.5, 4.2)
+        status_box.info(f"☕ Cloudflare koruması için dinleniliyor ({sleep_sec:.1f} sn)...")
+        time.sleep(sleep_sec)
         
     return users
 
 def render_grid(users_subset, all_users_dict, is_fan=False):
     if not users_subset:
-        st.caption("Bu kategoride listelenecek kullanıcı bulunamadı.")
+        st.success("Tebrikler! Bu kategoride listelenecek kullanıcı yok.")
         return
         
     cols = st.columns(4)
@@ -253,22 +274,22 @@ if baslat:
     status_box = st.empty()
     progress_bar = st.progress(0)
     
-    # 1. Takip Edilenleri Çek
+    # 1. Takip Edilenleri Çek (Following)
     following = fetch_user_list(session, cleaned_user, "following", status_box)
     progress_bar.progress(50)
     
-    time.sleep(0.8)
+    time.sleep(random.uniform(2.0, 3.5))
     
-    # 2. Takipçileri Çek
+    # 2. Takipçileri Çek (Followers)
     followers = fetch_user_list(session, cleaned_user, "followers", status_box)
     progress_bar.progress(100)
     
     if not following and not followers:
-        status_box.error("Veriler çekilemedi. Profilin gizli olmadığından emin ol.")
+        status_box.error("Kullanıcı verileri çekilemedi. Profilin açık olduğunu veya proxy ayarını kontrol et.")
         st.stop()
         
-    status_box.success(f"Tarama bitti! Toplam Takip Edilen: {len(following)} | Toplam Takipçi: {len(followers)}")
-    time.sleep(0.4)
+    status_box.success(f"Analiz tamamlandı! Toplam Takip Edilen: {len(following)} | Toplam Takipçi: {len(followers)}")
+    time.sleep(0.5)
     
     following_set = set(following.keys())
     followers_set = set(followers.keys())
@@ -277,7 +298,7 @@ if baslat:
     # Seni geri takip etmeyenler
     not_following_back = following_set - followers_set
     
-    # Senin takip etmediğin takipçiler
+    # Senin geri takip etmediğin takipçilerin
     fans = followers_set - following_set
 
     st.write("---")

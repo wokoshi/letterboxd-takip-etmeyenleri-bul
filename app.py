@@ -14,7 +14,7 @@ st.set_page_config(
 DEFAULT_PROXY = "" 
 PROXY_URL = st.secrets.get("DATAIMPULSE_PROXY", DEFAULT_PROXY)
 
-def get_session():
+def create_session():
     if PROXY_URL:
         return cureq.Session(proxies={"http": PROXY_URL, "https": PROXY_URL})
     return cureq.Session()
@@ -135,7 +135,7 @@ header {visibility: hidden;}
 """, unsafe_allow_html=True)
 
 st.markdown("<div class='title-text'>👥 Letterboxd Takipçi Analizcisi (Unfollow Checker)</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-text'>Cloudflare bypass ve yavaş, güvenli insansı tarama ile tüm sayfaları eksiksiz analiz eder.</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub-text'>Cloudflare bypass & dinamik oturum sıfırlama ile eksiksiz liste çıkarır.</div>", unsafe_allow_html=True)
 
 col_input, col_btn = st.columns([4, 1])
 with col_input:
@@ -143,12 +143,21 @@ with col_input:
 with col_btn:
     baslat = st.button("Taramayı Başlat 🚀", use_container_width=True)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Referer": "https://letterboxd.com/",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-}
+def get_headers(referer="https://letterboxd.com/"):
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": referer,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1"
+    }
 
 def clean_username(href):
     if not href:
@@ -158,44 +167,50 @@ def clean_username(href):
         return parts[-1].lower()
     return None
 
-def safe_get(session, url, status_box=None):
-    # Cloudflare veya Rate limit için 5 denemeli esnek bekleme
+def safe_get(session_holder, url, referer="https://letterboxd.com/", status_box=None):
     for deneme in range(1, 6):
         try:
-            res = session.get(url, impersonate="chrome120", headers=HEADERS, timeout=30)
+            headers = get_headers(referer)
+            # chrome124 parmak izi ile sorgula
+            res = session_holder["session"].get(url, impersonate="chrome124", headers=headers, timeout=25)
+            
             if res.status_code == 200:
-                # Sayfa içeriğinde cloudflare challenge var mı kontrolü
                 if "Just a moment..." in res.text or "cf-browser-verification" in res.text:
                     if status_box:
-                        status_box.warning(f"Cloudflare kontrolü algılandı! Bekleniyor... (Deneme {deneme}/5)")
-                    time.sleep(random.uniform(5.0, 7.5))
+                        status_box.warning(f"Cloudflare beklemesi... ({deneme}/5)")
+                    # Cloudflare challenge'ında yeni oturum aç
+                    session_holder["session"] = create_session()
+                    time.sleep(random.uniform(4.0, 6.0))
                     continue
                 return res.text
             elif res.status_code in [403, 429]:
-                bekleme = deneme * 4.0
+                bekleme = 3.5 + (deneme * 2.0)
                 if status_box:
-                    status_box.warning(f"Hız sınırına takıldı ({res.status_code}). {bekleme:.1f} sn dinleniliyor...")
+                    status_box.warning(f"403/429 algılandı. Yeni oturum açılıyor ve {bekleme:.1f} sn bekleniyor...")
+                # 403 yiyen oturumu tamamen çöpe atıp sıfırdan oluştur
+                session_holder["session"] = create_session()
                 time.sleep(bekleme)
             elif res.status_code == 404:
                 return None
-        except Exception as e:
-            if status_box:
-                status_box.warning(f"Bağlantı gecikmesi, tekrar deneniyor... ({deneme}/5)")
-            time.sleep(random.uniform(3.0, 5.0))
+        except Exception:
+            # Hata anında da oturumu tazele
+            session_holder["session"] = create_session()
+            time.sleep(random.uniform(3.0, 4.5))
             
     return None
 
-def fetch_user_list(session, username, list_type, status_box):
+def fetch_user_list(session_holder, username, list_type, status_box):
     """list_type: 'following' veya 'followers'"""
     users = {}
     page = 1
     type_tr = "Takip Edilenler (Following)" if list_type == "following" else "Takipçiler (Followers)"
+    last_url = f"https://letterboxd.com/{username}/"
     
     while True:
         url = f"https://letterboxd.com/{username}/{list_type}/" if page == 1 else f"https://letterboxd.com/{username}/{list_type}/page/{page}/"
-        status_box.info(f"⏳ **{type_tr}** taranıyor: **Sayfa {page}** (Şu ana kadar toplanan: {len(users)} kişi)")
+        status_box.info(f"⏳ **{type_tr}** taranıyor: **Sayfa {page}** (Toplanan: {len(users)} kişi)")
         
-        html = safe_get(session, url, status_box)
+        html = safe_get(session_holder, url, referer=last_url, status_box=status_box)
         if not html:
             break
             
@@ -224,23 +239,18 @@ def fetch_user_list(session, username, list_type, status_box):
                         users[uname] = avatar_url
                         found_in_page += 1
                         
-        # Sayfada hiç kullanıcı bulamadıysa bitir
         if found_in_page == 0:
             break
             
-        # Sonraki sayfa var mı kontrolü (Birden fazla seçici ile sağlama al)
         next_link = soup.select_one("a.next, .paginate-next a, li.paginate-next a, a[rel='next']")
-        
-        # Eğer buton bulunamadıysa ama bu sayfada tam 25 kişi varsa sonraki sayfayı yine de bir kez dene
         if not next_link and found_in_page < 20:
             break
             
+        last_url = url
         page += 1
         
-        # Sayfalar arası Cloudflare'e yakalanmamak için insan gibi bekle (2.5 - 4.2 sn)
-        sleep_sec = random.uniform(2.5, 4.2)
-        status_box.info(f"☕ Cloudflare koruması için dinleniliyor ({sleep_sec:.1f} sn)...")
-        time.sleep(sleep_sec)
+        # İnsansı dinlenme süresi (1.8 - 3.2 sn)
+        time.sleep(random.uniform(1.8, 3.2))
         
     return users
 
@@ -269,19 +279,21 @@ def render_grid(users_subset, all_users_dict, is_fan=False):
 
 if baslat:
     cleaned_user = kullanici_adi.strip().lower()
-    session = get_session()
+    
+    # Oturumu bir sözlük içinde tutuyoruz ki 403 yediğinde anında yenisiyle değiştirebilelim
+    session_holder = {"session": create_session()}
     
     status_box = st.empty()
     progress_bar = st.progress(0)
     
     # 1. Takip Edilenleri Çek (Following)
-    following = fetch_user_list(session, cleaned_user, "following", status_box)
+    following = fetch_user_list(session_holder, cleaned_user, "following", status_box)
     progress_bar.progress(50)
     
-    time.sleep(random.uniform(2.0, 3.5))
+    time.sleep(random.uniform(1.5, 2.5))
     
     # 2. Takipçileri Çek (Followers)
-    followers = fetch_user_list(session, cleaned_user, "followers", status_box)
+    followers = fetch_user_list(session_holder, cleaned_user, "followers", status_box)
     progress_bar.progress(100)
     
     if not following and not followers:

@@ -73,6 +73,8 @@ hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
 def get_proxy_list():
     try:
+        if "WEBSHARE_PROXIES" not in st.secrets:
+            return []
         raw_proxies = st.secrets["WEBSHARE_PROXIES"]
         if "," in raw_proxies:
             return [p.strip() for p in raw_proxies.split(",") if p.strip()]
@@ -86,15 +88,16 @@ def veri_cek(kullanici_adi, tip):
     proxy_havuzu = get_proxy_list()
     
     if not proxy_havuzu:
-        return "PROXY_ERROR"
+        return "HATA: Secrets içinde WEBSHARE_PROXIES bulunamadı veya boş!"
 
     sayfa = 1
+    son_hata = "Bilinmeyen hata"
 
     while True:
         url = f"https://letterboxd.com/{kullanici_adi}/{tip}/" if sayfa == 1 else f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{sayfa}/"
         sayfa_basarili = False
 
-        for deneme in range(10):
+        for deneme in range(len(proxy_havuzu) * 2):
             secilen_proxy = random.choice(proxy_havuzu)
             proxies = {"http": secilen_proxy, "https": secilen_proxy}
             session = cureq.Session()
@@ -108,11 +111,15 @@ def veri_cek(kullanici_adi, tip):
                 if res.status_code == 404:
                     return None if sayfa == 1 else kisiler
 
-                if res.status_code != 200 or "Cloudflare" in res.text or "Just a moment" in res.text:
+                if res.status_code != 200:
+                    son_hata = f"HTTP {res.status_code} kodu döndü"
+                    continue
+
+                if "Cloudflare" in res.text or "Just a moment" in res.text:
+                    son_hata = "Cloudflare JS Challenge ekranına takıldı"
                     continue
 
                 soup = BeautifulSoup(res.text, 'html.parser')
-
                 satirlar = soup.find_all('div', class_='person-summary')
 
                 if not satirlar:
@@ -130,28 +137,28 @@ def veri_cek(kullanici_adi, tip):
                 sayfa_basarili = True
                 break
 
-            except:
+            except Exception as e:
+                son_hata = f"İstisnai Hata: {str(e)}"
                 continue
 
         if not sayfa_basarili:
-            return "BLOK"
+            return f"BLOK [{son_hata}]"
 
 if st.button("Analizi Başlat 🎬"):
-
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
-        with st.spinner("Tarama başlatılıyor... Takipçi ve takip edilen sayınızın yoğunluğuna bağlı olarak işlemin süresi değişiklik gösterebilir. Lütfen bekleyiniz."):
-
+        with st.spinner("Tarama başlatılıyor... Lütfen bekleyiniz."):
             following = veri_cek(hedef_kullanici.strip().lower(), "following")
             followers = veri_cek(hedef_kullanici.strip().lower(), "followers")
 
-        if following in ["BLOK", "PROXY_ERROR"] or followers in ["BLOK", "PROXY_ERROR"]:
-            st.error("Sistem geçici olarak çalışmıyor lütfen daha sonra tekrar deneyiniz.")
+        if (isinstance(following, str) and (following.startswith("BLOK") or following.startswith("HATA"))) or \
+           (isinstance(followers, str) and (followers.startswith("BLOK") or followers.startswith("HATA"))):
+            st.error(f"Following Durumu: {following}")
+            st.error(f"Followers Durumu: {followers}")
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
-
             if islem_modu == "Beni Takip Etmeyenler":
                 sonuc = {u: following[u] for u in following if u not in followers}
             else:
@@ -160,14 +167,11 @@ if st.button("Analizi Başlat 🎬"):
             st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 
             users = list(sonuc.items())
-
             for i in range(0, len(users), 2):
                 cols = st.columns(2)
-
                 for j in range(2):
                     if i + j < len(users):
                         usr, img = users[i+j]
-
                         with cols[j]:
                             st.markdown(f"""
                             <div class="card">

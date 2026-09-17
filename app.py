@@ -1,8 +1,8 @@
 import streamlit as st
 from bs4 import BeautifulSoup
-from curl_cffi import requests as cureq
+import requests
+import urllib.parse
 import time
-import random
 
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
@@ -71,91 +71,70 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-def get_proxy_list():
-    try:
-        if "WEBSHARE_PROXIES" not in st.secrets:
-            return []
-        raw_proxies = st.secrets["WEBSHARE_PROXIES"]
-        if "," in raw_proxies:
-            return [p.strip() for p in raw_proxies.split(",") if p.strip()]
-        return [p.strip() for p in raw_proxies.splitlines() if p.strip()]
-    except Exception:
-        return []
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def veri_cek(kullanici_adi, tip):
     kisiler = {}
-    proxy_havuzu = get_proxy_list()
     
-    if not proxy_havuzu:
-        return "HATA: Secrets içinde WEBSHARE_PROXIES bulunamadı veya boş!"
-
+    if "ZENROWS_API_KEY" not in st.secrets:
+        return "KEY_YOK"
+        
+    api_key = st.secrets["ZENROWS_API_KEY"]
     sayfa = 1
-    son_hata = "Bilinmeyen hata"
 
     while True:
-        url = f"https://letterboxd.com/{kullanici_adi}/{tip}/" if sayfa == 1 else f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{sayfa}/"
-        sayfa_basarili = False
+        target_url = f"https://letterboxd.com/{kullanici_adi}/{tip}/" if sayfa == 1 else f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{sayfa}/"
+        
+        # ZenRows API üzerinden Cloudflare bypass isteği
+        params = {
+            "apikey": api_key,
+            "url": target_url,
+            "js_render": "true",
+            "premium_proxy": "true"
+        }
 
-        for deneme in range(len(proxy_havuzu) * 2):
-            secilen_proxy = random.choice(proxy_havuzu)
-            proxies = {"http": secilen_proxy, "https": secilen_proxy}
-            session = cureq.Session()
+        try:
+            res = requests.get("https://api.zenrows.com/v1/", params=params, timeout=30)
+            
+            if res.status_code == 404:
+                return None if sayfa == 1 else kisiler
+                
+            if res.status_code != 200:
+                return f"BLOK [{res.status_code}]"
 
-            if deneme > 0:
-                time.sleep(random.uniform(0.6, 1.4))
+            soup = BeautifulSoup(res.text, 'html.parser')
+            satirlar = soup.find_all('div', class_='person-summary')
 
-            try:
-                res = session.get(url, proxies=proxies, impersonate="chrome120", timeout=20)
+            if not satirlar:
+                return kisiler
 
-                if res.status_code == 404:
-                    return None if sayfa == 1 else kisiler
+            for s in satirlar:
+                a = s.find('a', class_='name')
+                if a:
+                    username = a['href'].strip('/')
+                    img = s.find('img')
+                    img_url = img['src'] if img else "https://s.ltrbxd.com/static/img/avatar220.png"
+                    kisiler[username] = img_url
 
-                if res.status_code != 200:
-                    son_hata = f"HTTP {res.status_code} kodu döndü"
-                    continue
+            sayfa += 1
+            time.sleep(0.5)
 
-                if "Cloudflare" in res.text or "Just a moment" in res.text:
-                    son_hata = "Cloudflare JS Challenge ekranına takıldı"
-                    continue
-
-                soup = BeautifulSoup(res.text, 'html.parser')
-                satirlar = soup.find_all('div', class_='person-summary')
-
-                if not satirlar:
-                    return kisiler
-
-                for s in satirlar:
-                    a = s.find('a', class_='name')
-                    if a:
-                        username = a['href'].strip('/')
-                        img = s.find('img')
-                        img_url = img['src'] if img else "https://s.ltrbxd.com/static/img/avatar220.png"
-                        kisiler[username] = img_url
-
-                sayfa += 1
-                sayfa_basarili = True
-                break
-
-            except Exception as e:
-                son_hata = f"İstisnai Hata: {str(e)}"
-                continue
-
-        if not sayfa_basarili:
-            return f"BLOK [{son_hata}]"
+        except Exception as e:
+            return f"BLOK [{str(e)}]"
 
 if st.button("Analizi Başlat 🎬"):
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
         with st.spinner("Tarama başlatılıyor... Lütfen bekleyiniz."):
-            following = veri_cek(hedef_kullanici.strip().lower(), "following")
-            followers = veri_cek(hedef_kullanici.strip().lower(), "followers")
+            cleaned = hedef_kullanici.strip().lower()
+            following = veri_cek(cleaned, "following")
+            followers = veri_cek(cleaned, "followers")
 
-        if (isinstance(following, str) and (following.startswith("BLOK") or following.startswith("HATA"))) or \
-           (isinstance(followers, str) and (followers.startswith("BLOK") or followers.startswith("HATA"))):
-            st.error(f"Following Durumu: {following}")
-            st.error(f"Followers Durumu: {followers}")
+        if following == "KEY_YOK" or followers == "KEY_YOK":
+            st.error("Secrets altında ZENROWS_API_KEY tanımlanmamış!")
+        elif (isinstance(following, str) and following.startswith("BLOK")) or \
+             (isinstance(followers, str) and followers.startswith("BLOK")):
+            st.error(f"Bağlantı Hatası: Following -> {following} | Followers -> {followers}")
         elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:

@@ -4,14 +4,10 @@ from curl_cffi import requests as cureq
 import time
 import random
 
-# Sayfa Ayarı
-st.set_page_config(
-    page_title="Letterboxd Takip Analizi", 
-    page_icon="🎬", 
-    layout="wide"
-)
+# ayar
+st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
 
-# Gelişmiş Yeşil / Letterboxd UI Tasarımı
+# css
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -21,57 +17,52 @@ footer {visibility: hidden;}
 header {visibility: hidden;}
 
 .stApp { 
-    background-color: #0b110e; 
+    background-color: #0c120e; 
     color: #9ab; 
     font-family: 'Inter', -apple-system, sans-serif;
 }
 
-/* Üst Başlık Bloğu */
-.hero-wrapper {
-    text-align: center;
-    padding: 2.2rem 1rem 1.6rem 1rem;
-    margin-bottom: 1.5rem;
-    border-radius: 20px;
-    background: radial-gradient(circle at top, rgba(0, 224, 84, 0.09) 0%, rgba(11, 17, 14, 0) 70%);
-}
-
 .custom-title {
     color: #ffffff;
-    font-size: 2.3rem;
+    font-size: 2.1rem;
     font-weight: 800;
+    text-align: center;
     letter-spacing: -0.5px;
-    margin-bottom: 0.4rem;
-}
-
-.custom-title span {
-    color: #00e054;
+    margin-top: 0.5rem;
 }
 
 .custom-subtitle {
-    color: #7b8e83;
-    font-size: 1rem;
-    font-weight: 400;
-    max-width: 500px;
-    margin: 0 auto;
+    text-align: center;
+    color: #6a7c70;
+    font-size: 0.95rem;
+    margin-bottom: 2rem;
 }
 
-/* Kontrol Kutusu */
-.search-container {
-    max-width: 720px;
-    margin: 0 auto 2.5rem auto;
-    background: #141c17;
-    padding: 1.8rem;
-    border-radius: 16px;
-    border: 1px solid #1f2b24;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+/* Radio Butonları */
+div[role="radiogroup"] {
+    justify-content: center;
+    gap: 2rem;
+    margin-bottom: 1.2rem;
 }
 
-/* Giriş Kutusu */
+div[role="radiogroup"] label {
+    background: #131c16;
+    padding: 8px 16px;
+    border-radius: 20px;
+    border: 1px solid #1e2c22;
+    transition: all 0.2s ease;
+}
+
+div[role="radiogroup"] label:hover {
+    border-color: #00e054;
+}
+
+/* Input Alanı */
 div[data-baseweb="input"] {
-    background-color: #0e1511 !important;
-    border: 1px solid #23332a !important;
-    border-radius: 10px !important;
-    color: #ffffff !important;
+    background-color: #121a14 !important;
+    border: 1px solid #1f2e23 !important;
+    border-radius: 12px !important;
+    transition: all 0.2s ease;
 }
 
 div[data-baseweb="input"]:focus-within {
@@ -79,112 +70,89 @@ div[data-baseweb="input"]:focus-within {
     box-shadow: 0 0 0 1px #00e054 !important;
 }
 
-/* Buton */
+/* Analiz Butonu */
 .stButton>button {
-    background: linear-gradient(135deg, #00e054 0%, #00b341 100%) !important;
-    color: #0b110e !important;
-    font-weight: 700 !important;
-    font-size: 1.05rem !important;
-    border-radius: 10px !important;
-    border: none !important;
-    padding: 0.65rem 1.4rem !important;
-    transition: all 0.2s ease !important;
-    box-shadow: 0 4px 15px rgba(0, 224, 84, 0.25) !important;
+    background: linear-gradient(135deg, #00e054 0%, #00b341 100%);
+    color: #0a110c;
+    font-weight: 700;
+    font-size: 1rem;
+    border-radius: 12px;
+    border: none;
+    padding: 0.65rem 1rem;
+    width: 100%;
+    margin-top: 0.5rem;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 4px 14px rgba(0, 224, 84, 0.25);
 }
 
 .stButton>button:hover {
-    transform: translateY(-2px) !important;
-    box-shadow: 0 6px 20px rgba(0, 224, 84, 0.4) !important;
-    color: #000000 !important;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 224, 84, 0.4);
+    color: #000000;
 }
 
-/* Radio Seçim */
-div[role="radiogroup"] {
-    justify-content: center;
-    gap: 1.8rem;
-    margin-bottom: 1.2rem;
+.stButton>button:active {
+    transform: translateY(0px);
 }
 
 /* Kullanıcı Kartları */
-.card-wrapper {
-    background: #131a15;
-    border: 1px solid #1c2720;
+.card {
+    background: #131b15;
+    border: 1px solid #1c2920;
+    padding: 10px 14px;
     border-radius: 14px;
-    padding: 12px 14px;
     display: flex;
     align-items: center;
-    gap: 14px;
-    margin-bottom: 14px;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    gap: 12px;
+    margin-bottom: 12px;
+    transition: all 0.2s ease;
 }
 
-.card-wrapper:hover {
+.card:hover {
     border-color: #00e054;
-    background: #17221b;
-    transform: translateY(-3px);
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
 }
 
-.card-avatar {
-    width: 52px;
-    height: 52px;
+.card img {
     border-radius: 50%;
+    width: 46px;
+    height: 46px;
     object-fit: cover;
-    border: 2px solid #23332a;
-    flex-shrink: 0;
+    border: 1.5px solid #233529;
 }
 
-.card-info {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
-
-.card-username {
+.card b {
     color: #ffffff;
-    font-weight: 700;
-    font-size: 0.96rem;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.card-link {
-    color: #00e054;
-    font-size: 0.82rem;
-    font-weight: 500;
-    text-decoration: none;
-    margin-top: 2px;
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-}
-
-.card-link:hover {
-    text-decoration: underline;
-}
-
-/* Sonuç Sayacı Rozeti */
-.result-badge {
-    background: rgba(0, 224, 84, 0.1);
-    border: 1px solid rgba(0, 224, 84, 0.25);
-    color: #00e054;
-    padding: 8px 18px;
-    border-radius: 30px;
     font-size: 0.95rem;
     font-weight: 600;
-    display: inline-block;
-    margin-bottom: 1.8rem;
+}
+
+.card a {
+    color: #00e054;
+    font-size: 0.8rem;
+    text-decoration: none;
+    font-weight: 500;
+    transition: color 0.15s ease;
+}
+
+.card a:hover {
+    text-decoration: underline;
+    color: #40ff7d;
 }
 
 /* Footer */
 .footer-sig {
     text-align: center;
-    color: #536558;
-    font-size: 0.88rem;
-    margin-top: 4rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid #18221b;
+    color: #5A6E5E;
+    font-size: 14px;
+    margin-top: 3.5rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid #1A2E20;
+    width: 60%;
+    opacity: 0.9;
+    margin-left: auto;
+    margin-right: auto;
 }
 
 .footer-sig a {
@@ -192,36 +160,26 @@ div[role="radiogroup"] {
     text-decoration: none;
     font-weight: 600;
 }
+
+.footer-sig a:hover {
+    text-decoration: underline;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# Başlık
-st.markdown("""
-<div class='hero-wrapper'>
-    <div class='custom-title'>Letterboxd <span>Takip Analizi</span></div>
-    <div class='custom-subtitle'>Hesabınızın takipçi ve takip edilen dengesini hızlı, güvenli ve net şekilde görüntüleyin.</div>
-</div>
-""", unsafe_allow_html=True)
+st.markdown("<div class='custom-title'>🔍 Letterboxd Takip Analizi</div>", unsafe_allow_html=True)
+st.markdown("<div class='custom-subtitle'>Hesabınızın takipçi ve takip edilen durumunu tek tuşla öğrenin.</div>", unsafe_allow_html=True)
 
-# Giriş ve Seçim Alanı
-st.markdown("<div class='search-container'>", unsafe_allow_html=True)
-
+# mod
 islem_modu = st.radio(
     "",
     ["Beni Takip Etmeyenler", "Benim Takip Etmediklerim"],
-    horizontal=True,
-    label_visibility="collapsed"
+    horizontal=True
 )
 
-col_in, col_bt = st.columns([3.5, 1.5])
-with col_in:
-    hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:", placeholder="Letterboxd kullanıcı adın (örn: wokoshi)", label_visibility="collapsed")
-with col_bt:
-    analiz_tetikle = st.button("Analizi Başlat 🎬", use_container_width=True)
+hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-st.markdown("</div>", unsafe_allow_html=True)
-
-# Veri Kazıma Motoru
+# veri
 @st.cache_data(ttl=1800, show_spinner=False)
 def veri_cek(kullanici_adi, tip):
     kisiler = {}
@@ -241,6 +199,7 @@ def veri_cek(kullanici_adi, tip):
         sayfa_basarili = False
 
         for deneme in range(10):
+
             if deneme > 0:
                 time.sleep(random.uniform(0.6, 1.4))
 
@@ -255,6 +214,7 @@ def veri_cek(kullanici_adi, tip):
                     continue
 
                 soup = BeautifulSoup(res.text, 'html.parser')
+
                 satirlar = soup.find_all('div', class_='person-summary')
 
                 if not satirlar:
@@ -278,47 +238,52 @@ def veri_cek(kullanici_adi, tip):
         if not sayfa_basarili:
             return "BLOK"
 
-# İşlem Bloğu
-if analiz_tetikle:
-    if not hedef_kullanici.strip():
-        st.warning("Lütfen analiz etmek istediğiniz kullanıcı adını giriniz.")
-    else:
-        with st.spinner("Letterboxd üzerinden takip verileri taranıyor, lütfen bekleyiniz..."):
-            cleaned_target = hedef_kullanici.strip().lower()
-            following = veri_cek(cleaned_target, "following")
-            followers = veri_cek(cleaned_target, "followers")
+# analiz
+if st.button("Analizi Başlat 🎬"):
 
-        if following in ["BLOK", "PROXY_ERROR"] or followers in ["BLOK", "PROXY_ERROR"]:
-            st.error("Proxy bağlantısında veya veri alımında anlık bir aksama yaşandı. Lütfen biraz bekleyip tekrar deneyin.")
+    if not hedef_kullanici:
+        st.warning("Kullanıcı adınızı giriniz")
+    else:
+        with st.spinner("Tarama başlatılıyor... Takipçi ve takip edilen sayınızın yoğunluğuna bağlı olarak işlemin süresi değişiklik gösterebilir. Lütfen bekleyiniz."):
+
+            following = veri_cek(hedef_kullanici, "following")
+            followers = veri_cek(hedef_kullanici, "followers")
+
+        if following in ["BLOK","PROXY_ERROR"] or followers in ["BLOK","PROXY_ERROR"]:
+            st.error("Sistem geçiçi olarak çalışmıyor lütfen daha sonra tekrar deneyiniz.")
         elif following is None or followers is None:
-            st.error("Belirtilen kullanıcı adı Letterboxd üzerinde bulunamadı veya profil gizli.")
+            st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
+
             if islem_modu == "Beni Takip Etmeyenler":
                 sonuc = {u: following[u] for u in following if u not in followers}
+                baslik = "Takip etmeyenler"
             else:
                 sonuc = {u: followers[u] for u in followers if u not in following}
+                baslik = "Senin takip etmediklerin"
 
-            st.markdown(f"<div style='text-align: center;'><span class='result-badge'>✨ Toplam {len(sonuc)} kullanıcı listelendi</span></div>", unsafe_allow_html=True)
+            st.success(f"İşlem başarılı! {len(sonuc)} kişi bulundu.")
 
+            # grid kismi
             users = list(sonuc.items())
 
-            # 3'lü Grid Dizilimi
-            cols_per_row = 3
-            for i in range(0, len(users), cols_per_row):
-                cols = st.columns(cols_per_row)
-                for j in range(cols_per_row):
+            for i in range(0, len(users), 2):
+                cols = st.columns(2)
+
+                for j in range(2):
                     if i + j < len(users):
-                        usr, img = users[i + j]
+                        usr, img = users[i+j]
+
                         with cols[j]:
                             st.markdown(f"""
-                            <div class="card-wrapper">
-                                <img src="{img}" class="card-avatar">
-                                <div class="card-info">
-                                    <span class="card-username">@{usr}</span>
-                                    <a href="https://letterboxd.com/{usr}/" target="_blank" class="card-link">Profile git ↗</a>
+                            <div class="card">
+                                <img src="{img}" width="50">
+                                <div>
+                                    <b>{usr}</b><br>
+                                    <a href="https://letterboxd.com/{usr}/" target="_blank">Profile git</a>
                                 </div>
                             </div>
                             """, unsafe_allow_html=True)
 
-# Footer
-st.markdown("<div class='footer-sig'>Geliştirici: <a href='https://letterboxd.com/wokoshi/' target='_blank'>wokoshi</a> • Letterboxd Analiz Aracı</div>", unsafe_allow_html=True)
+# --- FOOTER ---
+st.markdown("<div class='footer-sig'>Created by <a href='https://letterboxd.com/wokoshi/' target='_blank'>wokoshi</a></div>", unsafe_allow_html=True)

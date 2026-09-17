@@ -80,7 +80,7 @@ def veri_cek(kullanici_adi, tip):
     kisiler = {}
     
     try:
-        PROXY_URL = st.secrets["DATAIMPULSE_PROXY"]
+        PROXY_URL = st.secrets["DEXODATA_PROXY"]
     except:
         return "PROXY_ERROR"
         

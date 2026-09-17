@@ -1,25 +1,18 @@
 import streamlit as st
 from bs4 import BeautifulSoup
-import asyncio
-import math
-import os
+import requests
+import time
 
 st.set_page_config(page_title="Letterboxd Takip Analizi", page_icon="🔍", layout="centered")
-
-@st.cache_resource
-def setup_browser_engine():
-    os.system("playwright install chromium")
-
-setup_browser_engine()
-
-from playwright.async_api import async_playwright
 
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 header {visibility: hidden;}
+
 .stApp { background-color: #0A110C; color: #9CAF9F; }
+
 .custom-title {
     color: #E8F0E9;
     font-size: 1.8rem;
@@ -31,6 +24,7 @@ header {visibility: hidden;}
     color: #7A8C7D;
     margin-bottom: 1.8rem;
 }
+
 .footer-sig {
     text-align: center;
     color: #5A6E5E;
@@ -43,13 +37,16 @@ header {visibility: hidden;}
     margin-left: auto;
     margin-right: auto;
 }
+
 .stButton>button {
     background-color: #1B5E32;
     color: white;
     border-radius: 12px;
     width: 100%;
 }
+
 img { border-radius: 10px; }
+
 .card {
     background-color:#121E15;
     padding:10px;
@@ -73,130 +70,88 @@ islem_modu = st.radio(
 
 hedef_kullanici = st.text_input("Kullanıcı adınızı giriniz:")
 
-def extract_users(html):
-    soup = BeautifulSoup(html, 'html.parser')
-    users = {}
+def fetch_via_solver(target_url, solver_url):
+    payload = {
+        "cmd": "request.get",
+        "url": target_url,
+        "maxTimeout": 45000
+    }
+    headers = {"Content-Type": "application/json"}
     
-    # Sadece ana gövdedeki tabloyu ve person kartlarını hedefle
-    main_section = soup.select_one("div#content, section#content, div.site-body")
-    target_soup = main_section if main_section else soup
+    try:
+        res = requests.post(solver_url, json=payload, headers=headers, timeout=50)
+        data = res.json()
+        if data.get("status") == "ok":
+            solution = data.get("solution", {})
+            return solution.get("status", 200), solution.get("response", "")
+        return 500, ""
+    except Exception:
+        return 500, ""
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def veri_cek(kullanici_adi, tip):
+    kisiler = {}
     
-    # Kenar çubuğunu temizle
-    for s in target_soup.select("aside, .sidebar, #sidebar, div.sidebar"):
-        s.decompose()
-
-    cards = target_soup.select("table.person-table tr, div.person-summary")
-    for card in cards:
-        a = card.find('a', class_='name')
-        if a and a.get('href'):
-            parts = a['href'].strip('/').split('/')
-            if parts:
-                uname = parts[-1].lower()
-                img = card.find('img')
-                img_url = img['src'] if img and img.get('src') else "https://s.ltrbxd.com/static/img/avatar220.png"
-                users[uname] = img_url
-
-    return users
-
-async def wait_for_letterboxd_page(page, url):
-    # Cloudflare challenge kontrolü ve bekleme mekanizması
-    for attempt in range(3):
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(1500)
+    if "FLARESOLVERR_URL" not in st.secrets:
+        return "SECRET_EKSIK"
         
-        title = await page.title()
-        content = await page.content()
-        
-        # Eğer Cloudflare ekranı gelirse çözülmesi için bekle
-        if "Just a moment" in title or "Cloudflare" in content:
-            await page.wait_for_timeout(3500)
-            title = await page.title()
-            
-        if "Just a moment" not in title:
-            return content
-            
-        await page.wait_for_timeout(2000)
-    
-    return await page.content()
-
-async def fetch_relation_list(browser, username, relation_type):
-    context = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        viewport={"width": 1366, "height": 768},
-        locale="en-US"
-    )
-    await context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        window.navigator.chrome = { runtime: {} };
-    """)
-    page = await context.new_page()
-
-    all_users = {}
-    page_num = 1
+    solver_url = st.secrets["FLARESOLVERR_URL"]
+    sayfa = 1
 
     while True:
-        url = f"https://letterboxd.com/{username}/{relation_type}/page/{page_num}/" if page_num > 1 else f"https://letterboxd.com/{username}/{relation_type}/"
+        url = f"https://letterboxd.com/{kullanici_adi}/{tip}/" if sayfa == 1 else f"https://letterboxd.com/{kullanici_adi}/{tip}/page/{sayfa}/"
         
-        try:
-            content = await wait_for_letterboxd_page(page, url)
+        status_code, html_content = fetch_via_solver(url, solver_url)
+        
+        if status_code == 404:
+            return None if sayfa == 1 else kisiler
             
-            # Sayfa 404 mü veya hesap yok mu?
-            if "Page not found" in content and page_num == 1:
-                await context.close()
-                return None
+        if status_code != 200 or not html_content:
+            return f"BLOK [{status_code}]"
 
-            page_users = extract_users(content)
-            
-            # Eğer hiç kullanıcı gelmediyse ve hala Cloudflare'deyse dur
-            if not page_users:
-                break
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Kenar çubuğunu temizle
+        for s in soup.select("aside, .sidebar, #sidebar, div.sidebar"):
+            s.decompose()
 
-            all_users.update(page_users)
+        satirlar = soup.find_all('div', class_='person-summary')
+        if not satirlar:
+            return kisiler
 
-            # Sayfalamada 'Next' butonu var mı kontrolü
-            soup = BeautifulSoup(content, 'html.parser')
-            has_next = soup.select("a.next, .paginate-next a, a[rel='next']")
-            
-            if not has_next:
-                break
+        for s in satirlar:
+            a = s.find('a', class_='name')
+            if a and a.get('href'):
+                uname = a['href'].strip('/').split('/')[-1].lower()
+                img = s.find('img')
+                img_url = img['src'] if img and img.get('src') else "https://s.ltrbxd.com/static/img/avatar220.png"
+                kisiler[uname] = img_url
 
-            page_num += 1
-            await page.wait_for_timeout(1200) # Cloudflare ratelimit yememek için bekleme
-
-        except Exception as e:
+        # Sonraki sayfa kontrolü
+        has_next = soup.select("a.next, .paginate-next a, a[rel='next']")
+        if not has_next:
             break
 
-    await context.close()
-    return all_users
+        sayfa += 1
+        time.sleep(0.5)
 
-async def execute_scraping(username):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
-            ]
-        )
-        following = await fetch_relation_list(browser, username, "following")
-        await asyncio.sleep(1)
-        followers = await fetch_relation_list(browser, username, "followers")
-        await browser.close()
-        return following, followers
+    return kisiler
 
 if st.button("Analizi Başlat 🎬"):
     if not hedef_kullanici:
         st.warning("Kullanıcı adınızı giriniz")
     else:
-        with st.spinner("Tarama başlatılıyor... Cloudflare doğrulamaları aşılıyor, lütfen bekleyiniz."):
+        with st.spinner("Tarama başlatılıyor... Cloudflare engelleri çözülüyor, lütfen bekleyiniz."):
             cleaned = hedef_kullanici.strip().lower()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            following, followers = loop.run_until_complete(execute_scraping(cleaned))
+            following = veri_cek(cleaned, "following")
+            followers = veri_cek(cleaned, "followers")
 
-        if following is None or followers is None:
+        if following == "SECRET_EKSIK" or followers == "SECRET_EKSIK":
+            st.error("Secrets altında FLARESOLVERR_URL tanımlanmamış!")
+        elif (isinstance(following, str) and following.startswith("BLOK")) or \
+             (isinstance(followers, str) and followers.startswith("BLOK")):
+            st.error(f"Hata Oluştu: Following -> {following} | Followers -> {followers}")
+        elif following is None or followers is None:
             st.error("Bu kullanıcı adıyla ilgili hesap bulunmuyor. Kullanıcı adınızı kontrol ediniz.")
         else:
             if islem_modu == "Beni Takip Etmeyenler":
